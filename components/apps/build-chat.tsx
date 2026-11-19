@@ -473,15 +473,19 @@ function TurnEffects({
   const handled = useRef(new Set<string>());
   const opening = useRef<string | null>(null);
   useEffect(() => {
-    // Only results arriving in this run: a thread loaded from history doesn't replay.
     if (!isRunning) return;
+    // Only this turn's messages, after the message that started it. The thread's
+    // history is loaded too, and `handled` starts empty on every page load, so
+    // without this the first run after a load replays every earlier create and
+    // edit: an old create then covers the page with the dashboard it made back then.
+    const turn = messages.slice(messages.findLastIndex((message) => message.role === "user") + 1);
     const toolNames = new Map<string, string>();
-    for (const message of messages) {
+    for (const message of turn) {
       if (message.role !== "assistant") continue;
       for (const call of message.toolCalls ?? []) toolNames.set(call.id, call.function.name);
     }
     const answered = new Set<string>();
-    for (const message of messages) {
+    for (const message of turn) {
       if (message.role !== "tool") continue;
       answered.add(message.toolCallId);
       if (handled.current.has(message.id)) continue;
@@ -503,7 +507,6 @@ function TurnEffects({
     // A create call in this turn that the model is still writing, or that's still
     // running: pending on the page it started from. A second one replaces a first
     // that's answered. Earlier turns don't count: a stopped one never gets an answer.
-    const turn = messages.slice(messages.findLastIndex((message) => message.role === "user") + 1);
     const waiting = turn.some(
       (message) =>
         message.role === "assistant" &&
