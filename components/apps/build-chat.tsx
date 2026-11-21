@@ -20,11 +20,9 @@ import {
   ArrowUpIcon,
   CheckIcon,
   ChevronDownIcon,
-  PanelRightCloseIcon,
   PlusIcon,
   SparklesIcon,
   SquareIcon,
-  XIcon,
 } from "lucide-react";
 import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
@@ -45,7 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { dashboardPath, parseAppPath } from "@/lib/apps/paths";
-import { useBuildPanel, usePublishDashboardResponse, useSetCreatingDashboard } from "./app-workspace";
+import { usePublishDashboardResponse, useSetCreatingDashboard } from "./app-workspace";
 import { scopeStorageToApp } from "@/lib/apps/thread-storage";
 import { cn } from "@/lib/utils";
 
@@ -138,10 +136,10 @@ export function BuildChat({
 
 /**
  * The Build panel's one header row: the thread in view (and the app's other
- * threads), a new one, and closing the panel.
+ * threads) and a new one. The workspace puts the panel's close button at its
+ * right end, in the space left for it.
  */
 function ThreadBar() {
-  const buildPanel = useBuildPanel();
   const threads = useThreadList((s) => s.threads);
   const selectedId = useThreadList((s) => s.selectedThreadId);
   const loadThreads = useThreadList((s) => s.loadThreads);
@@ -155,7 +153,7 @@ function ThreadBar() {
 
   return (
     // Same height as the app header beside it, so the two read as one top bar.
-    <div className="flex h-12 shrink-0 items-center gap-1 border-b pr-1.5 pl-2">
+    <div className="flex h-12 shrink-0 items-center gap-1 border-b pr-10 pl-2">
       <DropdownMenu>
         <DropdownMenuTrigger
           disabled={isRunning || threads.length === 0}
@@ -163,7 +161,8 @@ function ThreadBar() {
         >
           <SparklesIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           <span className="truncate">{current?.title ?? "New chat"}</span>
-          {threads.length > 0 && <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden />}
+          {/* No chevron while it can't be opened: it reads as a title, not a dead control. */}
+          {threads.length > 0 && !isRunning && <ChevronDownIcon className="size-3.5 shrink-0" aria-hidden />}
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-72">
           <DropdownMenuLabel>Chats in this app</DropdownMenuLabel>
@@ -184,11 +183,6 @@ function ThreadBar() {
         aria-label="New chat"
       >
         <PlusIcon aria-hidden />
-      </Button>
-      <Button variant="ghost" size="icon-sm" onClick={() => buildPanel.setOpen(false)} aria-label="Close the Build panel">
-        {/* Over the dashboard (below lg) it closes like a sheet; beside it, it collapses the side panel. */}
-        <XIcon className="lg:hidden" aria-hidden />
-        <PanelRightCloseIcon className="hidden lg:block" aria-hidden />
       </Button>
     </div>
   );
