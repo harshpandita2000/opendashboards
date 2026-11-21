@@ -1,10 +1,10 @@
 "use client";
 
 import { OpenUICloudProvider } from "@openuidev/react-ui/cloud";
-import { ChevronLeftIcon, PanelRightCloseIcon, PanelRightOpenIcon, SparklesIcon } from "lucide-react";
+import { ChevronLeftIcon, PanelRightCloseIcon, SparklesIcon, XIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { createContext, use, useCallback, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { renameAppAction } from "@/app/(app)/apps/actions";
 import { InlineRename } from "@/components/inline-rename";
@@ -150,7 +150,25 @@ export function AppWorkspace({
   dashboards: Dashboard[];
   children: React.ReactNode;
 }) {
-  const [open, setOpen] = useState(dashboards.length === 0);
+  const [open, setOpenState] = useState(dashboards.length === 0);
+  // Opening unmounts the header's Build button and closing hides the panel, so
+  // whichever had focus is gone: hand focus to the other side. Only when someone
+  // toggles it, not when the workspace first shows.
+  const panelRef = useRef<HTMLElement>(null);
+  const openButtonRef = useRef<HTMLButtonElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const moveFocus = useRef(false);
+  const setOpen = useCallback((next: boolean) => {
+    moveFocus.current = true;
+    setOpenState(next);
+  }, []);
+  useEffect(() => {
+    if (!moveFocus.current) return;
+    moveFocus.current = false;
+    if (open) (panelRef.current?.querySelector<HTMLElement>("textarea:not(:disabled)") ?? closeButtonRef.current)?.focus();
+    else openButtonRef.current?.focus();
+  }, [open]);
+  const buildPanel = useMemo(() => ({ open, setOpen }), [open, setOpen]);
   const [responses, setResponses] = useState<Record<string, string>>({});
   const publish = useCallback(
     (artifactId: string, response: string) =>
@@ -173,67 +191,76 @@ export function AppWorkspace({
     // share its token and artifact cache.
     <OpenUICloudProvider token="/api/frontend-token">
     <DashboardResponsesContext value={dashboardResponses}>
-    <BuildPanelContext value={{ open, setOpen }}>
+    <BuildPanelContext value={buildPanel}>
     <RenameAppContext value={startRename}>
-      <div className="flex h-full flex-col">
-        <header className="flex h-12 shrink-0 items-center gap-2 border-b px-2">
-          <Link
-            href="/apps"
-            aria-label="All apps"
-            className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-neutral-100 hover:text-foreground"
-          >
-            <ChevronLeftIcon className="size-4" aria-hidden />
-          </Link>
-          <AppTitle appId={appId} name={name} renaming={renaming} onRenamingChange={setRenaming} />
-          <div className="ml-1 hidden min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:flex">{badges}</div>
-          <div className="ml-auto flex shrink-0 items-center gap-1">
-            <Button
-              variant={open ? "secondary" : "ghost"}
-              size="sm"
-              onClick={() => setOpen(!open)}
-              aria-expanded={open}
-              aria-controls="app-builder"
+      {/* The Build panel runs the full height beside the dashboard column, header included. */}
+      <div className="relative flex h-full min-h-0">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <header className="flex h-12 shrink-0 items-center gap-2 border-b px-2">
+            <Link
+              href="/apps"
+              aria-label="All apps"
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-neutral-100 hover:text-foreground"
             >
-              {open ? <PanelRightCloseIcon aria-hidden /> : <PanelRightOpenIcon aria-hidden />}
-              Build
-            </Button>
-            {menu}
-          </div>
-        </header>
-
-        <div className="relative flex min-h-0 flex-1">
-          <div className="flex min-w-0 flex-1 flex-col">
-            <MobileDashboardTabs appId={appId} dashboards={dashboards} />
-            {showCreating ? <NewDashboard response={creating.response} /> : children}
-          </div>
-
-          <aside
-            id="app-builder"
-            aria-label="Build"
-            className={cn(
-              "min-h-0 flex-col border-l bg-background",
-              // Beside the dashboard on wide screens, over it below 1024px.
-              "absolute inset-y-0 right-0 z-10 w-full shadow-xl sm:w-[380px] lg:static lg:shadow-none",
-              open ? "flex" : "hidden",
-            )}
-          >
-            <div className="flex h-11 shrink-0 items-center justify-between border-b pr-1.5 pl-4">
-              <span className="flex items-center gap-2 text-sm font-medium">
-                <SparklesIcon className="size-4 text-muted-foreground" aria-hidden />
-                Build
-              </span>
-              <Button
-                variant="ghost"
-                size="icon-sm"
-                onClick={() => setOpen(false)}
-                aria-label="Collapse the Build panel"
-              >
-                <PanelRightCloseIcon aria-hidden />
-              </Button>
+              <ChevronLeftIcon className="size-4" aria-hidden />
+            </Link>
+            <AppTitle appId={appId} name={name} renaming={renaming} onRenamingChange={setRenaming} />
+            <div className="ml-1 hidden min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:flex">{badges}</div>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              {/* One Build control at a time: this opens the panel, and the panel's own header closes it. */}
+              {!open && (
+                <Button
+                  ref={openButtonRef}
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setOpen(true)}
+                  aria-expanded={false}
+                  aria-controls="app-builder"
+                >
+                  <SparklesIcon aria-hidden />
+                  Build
+                </Button>
+              )}
+              {menu}
             </div>
-            {builder}
-          </aside>
+          </header>
+
+          <MobileDashboardTabs appId={appId} dashboards={dashboards} />
+          {showCreating ? <NewDashboard response={creating.response} /> : children}
         </div>
+
+        <aside
+          ref={panelRef}
+          id="app-builder"
+          aria-label="Build"
+          className={cn(
+            "min-h-0 flex-col border-l bg-background",
+            // Beside the dashboard on wide screens, over it below 1024px. Full width
+            // (a phone) it covers the app header too; as a 380px sheet it starts under
+            // the header, so the app's menu and connections stay in reach.
+            "absolute inset-y-0 right-0 z-10 w-full shadow-xl sm:top-12 sm:w-[380px] lg:relative lg:top-0 lg:shadow-none",
+            open ? "flex" : "hidden",
+          )}
+        >
+          {/* The chat's thread bar is the panel's header: chat picker, new chat, and
+              room on the right for this close button. It's the workspace's, not the
+              chat's, so the panel can always be closed, whatever the chat is doing. */}
+          <Button
+            ref={closeButtonRef}
+            variant="ghost"
+            size="icon-sm"
+            onClick={() => setOpen(false)}
+            aria-expanded
+            aria-controls="app-builder"
+            aria-label="Close the Build panel"
+            className="absolute top-2.5 right-1.5"
+          >
+            {/* Over the dashboard (below lg) it closes like a sheet; beside it, it collapses the side panel. */}
+            <XIcon className="lg:hidden" aria-hidden />
+            <PanelRightCloseIcon className="hidden lg:block" aria-hidden />
+          </Button>
+          {builder}
+        </aside>
       </div>
     </RenameAppContext>
     </BuildPanelContext>
