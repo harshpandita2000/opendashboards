@@ -72,6 +72,12 @@ export const mcpSource: ConnectionSource<McpConfig> = {
         });
       case "host_not_found":
         return invalid({ code: "host_not_found", field: "url", message: "This host name doesn't resolve. Check the URL for typos." });
+      case "host_ipv6_only":
+        return invalid({
+          code: "host_ipv6_only",
+          field: "url",
+          message: "This host only answers over IPv6, which OpenDashboards can't reach. Use a URL whose host name has an IPv4 address.",
+        });
       case "unreachable":
         return unavailable({ code: "unreachable", field: "url", message: "Couldn't reach the MCP server. Check the URL, and that it accepts connections from OpenDashboards." });
       case "tls_failed":
