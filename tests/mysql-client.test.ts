@@ -52,7 +52,7 @@ describe("toMysqlError", () => {
     [{ code: "ENOTFOUND", message: "getaddrinfo ENOTFOUND" }, "host_not_found"],
     [{ code: "ECONNREFUSED", message: "connect ECONNREFUSED" }, "unreachable"],
     [{ code: "ETIMEDOUT", message: "connect ETIMEDOUT" }, "connect_timeout"],
-    [{ code: "HANDSHAKE_NO_SSL_SUPPORT", message: "Server does not support secure connection" }, "tls_failed"],
+    [{ code: "HANDSHAKE_NO_SSL_SUPPORT", message: "Server does not support secure connection" }, "ssl_unsupported"],
     [{ code: "SELF_SIGNED_CERT_IN_CHAIN", message: "self-signed certificate in certificate chain" }, "tls_failed"],
   ])("classifies %j as %s", (error, code) => {
     expect(toMysqlError(error).code).toBe(code);

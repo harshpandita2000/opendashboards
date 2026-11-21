@@ -10,6 +10,8 @@ export type ClickhouseErrorCode =
   | "host_ipv6_only"
   | "unreachable"
   | "timeout"
+  /** The port answers, but not with TLS: almost always the plain HTTP port. */
+  | "ssl_unsupported"
   | "tls_failed"
   /** The query tried to change something, or used something OpenDashboards doesn't allow. */
   | "read_only"
@@ -102,6 +104,7 @@ export function toClickhouseError(error: unknown): ClickhouseError {
   if (code === "ENOTFOUND" || code === "EAI_AGAIN" || code === "EAI_NONAME") return new ClickhouseError("host_not_found", message);
   if (code === "ETIMEDOUT" || err?.name === "AbortError") return new ClickhouseError("timeout", message);
   if (NETWORK_UNREACHABLE.has(code)) return new ClickhouseError("unreachable", message);
+  if (code === "ERR_SSL_WRONG_VERSION_NUMBER" || /wrong version number/i.test(message)) return new ClickhouseError("ssl_unsupported", message);
   if (TLS_CODES.test(code) || /certificate|self[- ]signed|SSL|TLS/i.test(message)) return new ClickhouseError("tls_failed", message);
   return new ClickhouseError("unexpected", message);
 }

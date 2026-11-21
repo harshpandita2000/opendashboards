@@ -112,6 +112,12 @@ export const mysqlSource: ConnectionSource<MysqlConfig> = {
           code: "timeout",
           message: `The query took longer than ${appConfig().mysql.statementTimeoutMs / 1000} seconds and was stopped. Filter to a shorter date range, use indexed columns in WHERE, or aggregate before joining.`,
         });
+      case "ssl_unsupported":
+        return invalid({
+          code: "ssl_unsupported",
+          field: "sslMode",
+          message: "This server doesn't accept encrypted (TLS) connections, and OpenDashboards never connects without encryption. Turn TLS on for the database, then try again.",
+        });
       case "tls_failed":
         return invalid({
           code: "tls_failed",

@@ -100,6 +100,12 @@ export const clickhouseSource: ConnectionSource<ClickhouseConfig> = {
           field: "host",
           message: "Couldn't reach ClickHouse. Check the host, and that the port is its HTTPS interface (8443 on ClickHouse Cloud).",
         });
+      case "ssl_unsupported":
+        return invalid({
+          code: "ssl_unsupported",
+          field: "port",
+          message: "This port doesn't answer over HTTPS, and OpenDashboards never connects without encryption. Use the server's HTTPS port (8443 on ClickHouse Cloud), not the plain HTTP one (8123).",
+        });
       case "tls_failed":
         return invalid({
           code: "tls_failed",

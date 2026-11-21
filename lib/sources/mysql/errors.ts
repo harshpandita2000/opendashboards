@@ -20,6 +20,8 @@ export type MysqlErrorCode =
   /** A query ran past the time limit. */
   | "query_timeout"
   /** TLS failed: no TLS on the server, or a certificate we couldn't verify. */
+  /** The server has TLS switched off. We never connect unencrypted, so it can't be used as it is. */
+  | "ssl_unsupported"
   | "tls_failed"
   /** The query tried to change something. */
   | "read_only"
@@ -105,6 +107,7 @@ export function toMysqlError(error: unknown): MysqlError {
       return new MysqlError("query_timeout", message);
   }
   if (NETWORK_UNREACHABLE.has(code)) return new MysqlError("unreachable", message);
+  if (code === "HANDSHAKE_NO_SSL_SUPPORT" || /does not support secure connection/i.test(message)) return new MysqlError("ssl_unsupported", message);
   if (TLS_CODES.test(code) || /secure connection|certificate|self[- ]signed|SSL|TLS/i.test(message)) {
     return new MysqlError("tls_failed", message);
   }
