@@ -8,8 +8,9 @@ import { z } from "zod";
 
 import { mcpConfigSchema, normalizeMcpUrl } from "@/lib/sources/mcp/catalog";
 import { callMcpTool, listMcpTools, testMcpServer, toCallResult } from "@/lib/sources/mcp/client";
-import { McpError } from "@/lib/sources/mcp/errors";
+import { McpError, toMcpError } from "@/lib/sources/mcp/errors";
 import { mcpSource } from "@/lib/sources/mcp/source";
+import { Ipv6OnlyHostError } from "@/lib/net/guarded-socket";
 
 /* The test hooks only let the client reach 127.0.0.1 over plain HTTP; every other rule is production's. */
 const hooks = { allowAddress: (address: string) => address === "127.0.0.1", allowHttp: true };
@@ -37,6 +38,15 @@ describe("MCP settings", () => {
     }
     expect(mcpConfigSchema.parse({ url: "https://mcp.example.com/mcp" }).headerName).toBe("Authorization");
     expect(mcpConfigSchema.parse({ url: "https://mcp.example.com/mcp", headerName: "X-API-Key" }).headerName).toBe("X-API-Key");
+  });
+});
+
+describe("toMcpError", () => {
+  it("finds an IPv6-only host inside a fetch error and says what to do", () => {
+    const error = Object.assign(new TypeError("fetch failed"), { cause: new Ipv6OnlyHostError("mcp.example.com") });
+    const mapped = toMcpError(error, { hasKey: false });
+    expect(mapped.code).toBe("host_ipv6_only");
+    expect(mcpSource.toError(mapped)?.error).toMatchObject({ field: "url", message: expect.stringMatching(/IPv4/) });
   });
 });
 

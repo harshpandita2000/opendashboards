@@ -88,6 +88,12 @@ export const clickhouseSource: ConnectionSource<ClickhouseConfig> = {
         });
       case "host_not_found":
         return invalid({ code: "host_not_found", field: "host", message: "This host name doesn't resolve. Check it for typos." });
+      case "host_ipv6_only":
+        return invalid({
+          code: "host_ipv6_only",
+          field: "host",
+          message: "This host only answers over IPv6, which OpenDashboards can't reach. Use a host name that has an IPv4 address.",
+        });
       case "unreachable":
         return unavailable({
           code: "unreachable",

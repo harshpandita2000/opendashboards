@@ -3,11 +3,13 @@ import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamable
 import { ErrorCode, McpError as ProtocolError } from "@modelcontextprotocol/sdk/types.js";
 
 import { OriginNotAllowedError, RedirectRefusedError, ResponseTooLargeError } from "@/lib/net/guarded-fetch";
-import { BlockedAddressError } from "@/lib/net/guarded-socket";
+import { BlockedAddressError, Ipv6OnlyHostError } from "@/lib/net/guarded-socket";
 
 export type McpErrorCode =
   | "host_blocked"
   | "host_not_found"
+  /** The host only has an IPv6 address, which we have no route to. */
+  | "host_ipv6_only"
   | "unreachable"
   | "tls_failed"
   /** The server redirected, which is never followed. */
@@ -68,6 +70,7 @@ export function toMcpError(error: unknown, { hasKey }: { hasKey: boolean }): Mcp
   for (const e of chain) {
     if (e instanceof McpError) return e;
     if (e instanceof BlockedAddressError) return new McpError("host_blocked", e.message);
+    if (e instanceof Ipv6OnlyHostError) return new McpError("host_ipv6_only", e.message);
     if (e instanceof OriginNotAllowedError) return new McpError("origin_refused");
     if (e instanceof RedirectRefusedError) return new McpError("redirected", e.message);
     if (e instanceof ResponseTooLargeError) return new McpError("too_large", e.message);
