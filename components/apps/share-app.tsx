@@ -1,63 +1,71 @@
 "use client";
 
-import { CheckIcon, EyeIcon, LinkIcon, Loader2Icon, LockIcon, PencilIcon, UsersIcon, XIcon } from "lucide-react";
+import { BuildingIcon, CheckIcon, LinkIcon, Loader2Icon, LockIcon, UsersIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { toast } from "sonner";
 
-import { addAppGuestAction, removeAppGuestAction, setAppTeamAccessAction } from "@/app/(app)/apps/actions";
+import {
+  addAppGuestAction,
+  removeAppGuestAction,
+  setAppTeamAccessAction,
+  shareAppWithMemberAction,
+  unshareAppWithMemberAction,
+} from "@/app/(app)/apps/actions";
+import { AvatarCircle } from "@/components/shell/avatar-circle";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import type { AppResult } from "@/lib/apps/errors";
 import { appPath } from "@/lib/apps/paths";
 import type { AppTeamAccess } from "@/lib/db/schema";
-import { cn } from "@/lib/utils";
 
 type App = { id: string; name: string; teamAccess: AppTeamAccess };
+/** A member of the workspace other than the app's owner, and what the app gave them by name, if anything. */
+type Teammate = { id: string; email: string; viewer: boolean; access: "view" | "edit" | null };
+type Level = "view" | "edit";
 
-const OPTIONS: { value: AppTeamAccess; label: string; icon: typeof LockIcon; detail: (workspace: string) => string }[] = [
-  { value: "private", label: "Private", icon: LockIcon, detail: () => "Only its owner can open it." },
-  { value: "view", label: "Workspace can view", icon: EyeIcon, detail: (workspace) => `Everyone in ${workspace} can open it.` },
-  {
-    value: "edit",
-    label: "Workspace can edit",
-    icon: PencilIcon,
-    detail: (workspace) => `Everyone in ${workspace} can open it; editors and admins can build in it.`,
-  },
-];
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 /**
- * Who else in the workspace can open the app, set like a shared document:
- * nobody, everyone to view, or everyone to edit. Its dashboards follow.
+ * Who can open the app, laid out like a shared document: a box to add people,
+ * the people who have access, the people outside the workspace who do, and
+ * what everyone in the workspace gets. Every change applies at once. The
+ * app's dashboards follow it; chats stay each person's own.
  */
 export function ShareApp({
   app,
   workspace,
+  owner,
   personalConnections,
   guests,
+  teammates,
   dashboardCount,
 }: {
   app: App;
   /** The workspace's name. */
   workspace: string;
+  /** The app's owner, and whether that's the person looking. */
+  owner: { email: string; you: boolean };
   /** How many of the app's connections are personal sign-ins: others can't query through them. */
   personalConnections: number;
   /** People outside the workspace who may view the app, by email. */
   guests: string[];
+  /** The workspace's other members: the ones the app is shared with by name, and the ones it could be. */
+  teammates: Teammate[];
   /** How many dashboards the app has: its first one is the moment to suggest sharing. */
   dashboardCount: number;
 }) {
   const [open, setOpen] = useState(false);
-  const nudge = useShareNudge(app.id, dashboardCount);
-  // Nothing to suggest once it's shared.
-  const showNudge = nudge.pending && !open && app.teamAccess === "private" && !guests.length;
-  const [choice, setChoice] = useState<AppTeamAccess>(app.teamAccess);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+  const nudge = useShareNudge(app.id, dashboardCount);
+  const added = teammates.filter((teammate) => teammate.access);
+  const unshared = app.teamAccess === "private" && !guests.length && !added.length;
+  // Nothing to suggest once it's shared.
+  const showNudge = nudge.pending && !open && unshared;
 
   function openDialog(next: boolean) {
-    if (pending) return;
     if (next) {
-      setChoice(app.teamAccess);
       setError(null);
       // Opening Share answers the suggestion.
       nudge.dismiss();
@@ -65,23 +73,30 @@ export function ShareApp({
     setOpen(next);
   }
 
-  function save() {
+  /** Runs one change. What it shows comes back from the server: the page re-renders with it. */
+  function change(action: () => Promise<AppResult>, done?: string) {
     startTransition(async () => {
-      const result = await setAppTeamAccessAction({ id: app.id, teamAccess: choice });
+      const result = await action();
       if (!result.ok) {
         setError(result.error.message);
         return;
       }
-      toast.success(choice === "private" ? `${app.name} is private` : `${app.name} is shared with ${workspace}`);
-      setOpen(false);
+      setError(null);
+      if (done) toast.success(done);
     });
   }
+
+  const shareWith = (teammate: Teammate, access: Level) =>
+    change(
+      () => shareAppWithMemberAction({ id: app.id, memberId: teammate.id, access }),
+      `${teammate.email} can ${access === "edit" ? "edit" : "view"} this app`,
+    );
 
   return (
     <>
       <div className="relative">
         <Button variant="outline" size="sm" onClick={() => openDialog(true)}>
-          {app.teamAccess === "private" && !guests.length ? <LockIcon aria-hidden /> : <UsersIcon aria-hidden />}
+          {unshared ? <LockIcon aria-hidden /> : <UsersIcon aria-hidden />}
           Share
         </Button>
         {showNudge && (
@@ -104,67 +119,284 @@ export function ShareApp({
         )}
       </div>
       <Dialog open={open} onOpenChange={openDialog}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>Share {app.name}</DialogTitle>
-            <DialogDescription>Its dashboards are shared with it. Chats stay your own.</DialogDescription>
+            <DialogTitle>Share “{app.name}”</DialogTitle>
+            <DialogDescription className="sr-only">Its dashboards are shared with it. Chats stay your own.</DialogDescription>
           </DialogHeader>
-          <div role="radiogroup" aria-label="Who can open this app" className="my-4 space-y-2">
-            {OPTIONS.map(({ value, label, icon: Icon, detail }) => (
-              <button
-                key={value}
-                type="button"
-                role="radio"
-                aria-checked={choice === value}
-                onClick={() => {
-                  setChoice(value);
-                  setError(null);
-                }}
-                className={cn(
-                  "flex w-full items-start gap-3 rounded-lg border p-3 text-left transition-colors",
-                  "focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
-                  choice === value ? "border-foreground/40 bg-neutral-50" : "hover:bg-neutral-50/60",
-                )}
-              >
-                <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
-                <span className="min-w-0">
-                  <span className="block text-sm font-medium">{label}</span>
-                  <span className="block text-sm text-muted-foreground">{detail(workspace)}</span>
-                </span>
-              </button>
-            ))}
-          </div>
-          {choice !== "private" && (
-            <div className="space-y-1 text-sm text-muted-foreground">
-              <p>Only share with people you trust.</p>
-              {personalConnections > 0 && (
-                <p>
-                  This app uses {personalConnections === 1 ? "1 connection" : `${personalConnections} connections`} only you can
-                  query. Others will be asked to sign in.
-                </p>
-              )}
-            </div>
+
+          <AddPeople
+            teammates={teammates}
+            guests={guests}
+            pending={pending}
+            onTeammate={(teammate) => shareWith(teammate, "view")}
+            onExternal={(email) =>
+              change(() => addAppGuestAction({ id: app.id, email }), `${email} can view this app once they sign in with that email`)
+            }
+          />
+
+          <section aria-labelledby="share-people" className="mt-4">
+            <SectionTitle id="share-people">People with access</SectionTitle>
+            <ul>
+              <Person email={owner.email} note={owner.you ? "You" : undefined}>
+                <span className="pr-2 text-sm text-muted-foreground">Owner</span>
+              </Person>
+              {added.map((teammate) => (
+                <Person key={teammate.id} email={teammate.email} note={teammate.viewer ? "Viewer in this workspace" : undefined}>
+                  <RoleSelect
+                    label={`Access for ${teammate.email}`}
+                    value={teammate.viewer ? "view" : teammate.access!}
+                    editor={!teammate.viewer}
+                    disabled={pending}
+                    onChange={(level) => shareWith(teammate, level)}
+                    onRemove={() => change(() => unshareAppWithMemberAction({ id: app.id, memberId: teammate.id }))}
+                  />
+                </Person>
+              ))}
+            </ul>
+          </section>
+
+          {guests.length > 0 && (
+            <section aria-labelledby="share-external" className="mt-4">
+              <SectionTitle id="share-external">External</SectionTitle>
+              <p className="mb-1 text-xs text-muted-foreground">Not in {workspace}. They can view this app and nothing else.</p>
+              <ul>
+                {guests.map((guest) => (
+                  <Person key={guest} email={guest}>
+                    {/* Viewing is all someone outside the workspace can have: nothing to choose, only to remove. */}
+                    <span className="text-sm text-muted-foreground">Viewer</span>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      aria-label={`Remove ${guest}`}
+                      disabled={pending}
+                      onClick={() => change(() => removeAppGuestAction({ id: app.id, email: guest }))}
+                    >
+                      <XIcon aria-hidden />
+                    </Button>
+                  </Person>
+                ))}
+              </ul>
+            </section>
           )}
+
+          <section aria-labelledby="share-general" className="mt-4">
+            <SectionTitle id="share-general">General access</SectionTitle>
+            <div className="flex items-center gap-3 py-1.5">
+              <span aria-hidden className="flex size-8 shrink-0 items-center justify-center rounded-full bg-neutral-100 text-neutral-600">
+                {app.teamAccess === "private" ? <LockIcon className="size-4" /> : <BuildingIcon className="size-4" />}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm">Everyone in {workspace}</p>
+                <p className="text-xs text-muted-foreground">
+                  {app.teamAccess === "private"
+                    ? "Only the people above can open it."
+                    : app.teamAccess === "view"
+                      ? "Anyone in the workspace can view it."
+                      : "Anyone in the workspace can open it; editors and admins can build in it."}
+                </p>
+              </div>
+              <select
+                aria-label={`Access for everyone in ${workspace}`}
+                value={app.teamAccess}
+                disabled={pending}
+                onChange={(event) => {
+                  const teamAccess = event.target.value as AppTeamAccess;
+                  change(
+                    () => setAppTeamAccessAction({ id: app.id, teamAccess }),
+                    teamAccess === "private" ? `${app.name} is no longer shared with ${workspace}` : `${app.name} is shared with ${workspace}`,
+                  );
+                }}
+                className={selectClass}
+              >
+                <option value="private">No access</option>
+                <option value="view">Viewer</option>
+                <option value="edit">Editor</option>
+              </select>
+            </div>
+          </section>
+
           {error && (
-            <p role="alert" className="text-sm text-destructive">
+            <p role="alert" className="mt-3 text-sm text-destructive">
               {error}
             </p>
           )}
-          <Guests appId={app.id} guests={guests} blocked={personalConnections > 0} />
+          <div className="mt-4 space-y-1 text-xs text-muted-foreground">
+            <p>Only share with people you trust.</p>
+            {personalConnections > 0 && (
+              <p>
+                This app uses {personalConnections === 1 ? "1 connection" : `${personalConnections} connections`} only you can query.
+                Others will be asked to sign in.
+              </p>
+            )}
+          </div>
           <DialogFooter>
             <CopyLink appId={app.id} />
-            <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={pending}>
-              Cancel
-            </Button>
-            {/* Saving the same choice again is allowed: it shares any dashboard that isn't shared yet. */}
-            <Button onClick={save} disabled={pending || (choice === "private" && app.teamAccess === "private")}>
+            <Button onClick={() => setOpen(false)}>
               {pending && <Loader2Icon className="animate-spin" aria-hidden />}
-              Save
+              Done
             </Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+const selectClass =
+  "h-8 shrink-0 rounded-md border-0 bg-transparent px-1.5 text-sm [text-align-last:right] text-foreground hover:bg-neutral-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:opacity-50";
+
+function SectionTitle({ id, children }: { id: string; children: React.ReactNode }) {
+  return (
+    <h3 id={id} className="mb-1 text-sm font-medium">
+      {children}
+    </h3>
+  );
+}
+
+/** One row of someone with access: who they are, and on the right what they have. */
+function Person({ email, note, children }: { email: string; note?: string; children: React.ReactNode }) {
+  return (
+    <li className="flex items-center gap-3 py-1.5">
+      <AvatarCircle name={email} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm">{email}</p>
+        {note && <p className="text-xs text-muted-foreground">{note}</p>}
+      </div>
+      {children}
+    </li>
+  );
+}
+
+/** What one person has, changed in place: Viewer, Editor where their role allows it, or nothing at all. */
+function RoleSelect({
+  label,
+  value,
+  editor,
+  disabled,
+  onChange,
+  onRemove,
+}: {
+  label: string;
+  value: Level;
+  /** Whether Editor can be chosen. Not for a viewer in the workspace, or someone outside it. */
+  editor: boolean;
+  disabled?: boolean;
+  onChange: (value: Level) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <select
+      aria-label={label}
+      value={value}
+      disabled={disabled}
+      onChange={(event) => {
+        const next = event.target.value;
+        if (next === "remove") onRemove();
+        else if (next !== value) onChange(next === "edit" ? "edit" : "view");
+      }}
+      className={selectClass}
+    >
+      <option value="view">Viewer</option>
+      {editor && <option value="edit">Editor</option>}
+      <option value="remove">Remove access</option>
+    </select>
+  );
+}
+
+/**
+ * The box people are added from. Typing suggests teammates the app isn't
+ * shared with yet; an email that isn't a teammate's adds someone outside the
+ * workspace, to view. A teammate starts as a viewer, changed in their row.
+ */
+function AddPeople({
+  teammates,
+  guests,
+  pending,
+  onTeammate,
+  onExternal,
+}: {
+  teammates: Teammate[];
+  guests: string[];
+  pending: boolean;
+  onTeammate: (teammate: Teammate) => void;
+  onExternal: (email: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [focused, setFocused] = useState(false);
+  const typed = query.trim().toLowerCase();
+  const suggestions = teammates.filter((teammate) => !teammate.access && teammate.email.toLowerCase().includes(typed)).slice(0, 6);
+  const known = teammates.some((teammate) => teammate.email.toLowerCase() === typed) || guests.includes(typed);
+  const external = EMAIL.test(typed) && !known ? typed : null;
+  const openList = focused && (suggestions.length > 0 || external !== null);
+
+  function pick(choice: Teammate | string) {
+    if (typeof choice === "string") onExternal(choice);
+    else onTeammate(choice);
+    setQuery("");
+  }
+
+  return (
+    <div
+      className="relative mt-3"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setFocused(false);
+      }}
+    >
+      <Input
+        type="text"
+        role="combobox"
+        aria-expanded={openList}
+        aria-controls="share-suggestions"
+        aria-label="Add people"
+        autoComplete="off"
+        placeholder={teammates.length ? "Add teammates or an email" : "Add someone by email"}
+        value={query}
+        disabled={pending}
+        onFocus={() => setFocused(true)}
+        onChange={(event) => setQuery(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Enter") return;
+          event.preventDefault();
+          const first = external ?? (typed ? suggestions[0] : undefined);
+          if (first) pick(first);
+        }}
+        className="h-10"
+      />
+      {openList && (
+        <ul id="share-suggestions" role="listbox" className="absolute inset-x-0 top-full z-20 mt-1 rounded-lg border bg-popover p-1 shadow-lg">
+          {suggestions.map((teammate) => (
+            <li key={teammate.id} role="option" aria-selected={false}>
+              <button
+                type="button"
+                // Keeps the box focused, so the list stays for the click.
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pick(teammate)}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-neutral-100 focus-visible:bg-neutral-100 focus-visible:outline-none"
+              >
+                <AvatarCircle name={teammate.email} className="size-7" />
+                <span className="min-w-0 flex-1 truncate text-sm">{teammate.email}</span>
+                {teammate.viewer && <span className="text-xs text-muted-foreground">Viewer in this workspace</span>}
+              </button>
+            </li>
+          ))}
+          {external && (
+            <li role="option" aria-selected={false}>
+              <button
+                type="button"
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => pick(external)}
+                className="flex w-full items-center gap-3 rounded-md px-2 py-1.5 text-left hover:bg-neutral-100 focus-visible:bg-neutral-100 focus-visible:outline-none"
+              >
+                <AvatarCircle name={external} className="size-7" />
+                <span className="min-w-0 flex-1 truncate text-sm">{external}</span>
+                <span className="text-xs text-muted-foreground">External, can view</span>
+              </button>
+            </li>
+          )}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -212,90 +444,6 @@ function useShareNudge(appId: string, dashboardCount: number) {
   }, [appId, dashboardCount]);
 
   return { pending: state === "pending", dismiss: () => state === "pending" && writeNudge(appId, "done") };
-}
-
-/**
- * People outside the workspace who may view the app: the whole app, read-only,
- * and nothing else of the workspace. Added and removed straight away, apart
- * from the choice above.
- */
-function Guests({ appId, guests, blocked }: { appId: string; guests: string[]; blocked: boolean }) {
-  const [email, setEmail] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [pending, startTransition] = useTransition();
-
-  function add(event: React.FormEvent) {
-    event.preventDefault();
-    startTransition(async () => {
-      const result = await addAppGuestAction({ id: appId, email });
-      if (!result.ok) {
-        setError(result.error.message);
-        return;
-      }
-      toast.success(`${email.trim()} can view this app once they sign in with that email`);
-      setEmail("");
-    });
-  }
-
-  function remove(guest: string) {
-    startTransition(async () => {
-      const result = await removeAppGuestAction({ id: appId, email: guest });
-      if (!result.ok) toast.error(result.error.message);
-    });
-  }
-
-  return (
-    <section aria-labelledby="share-guests" className="mt-5 border-t pt-4">
-      <h3 id="share-guests" className="text-sm font-medium">
-        People outside the workspace
-      </h3>
-      <p className="mt-0.5 text-sm text-muted-foreground">
-        They can view this app and nothing else. Only share with people you trust.
-      </p>
-      {blocked ? (
-        <p className="mt-3 text-sm text-muted-foreground">
-          Guests can&apos;t be added while this app uses a personal sign-in: they couldn&apos;t query through it.
-        </p>
-      ) : (
-        <form onSubmit={add} className="mt-3 flex items-center gap-2">
-          <Input
-            type="email"
-            aria-label="Guest's email"
-            placeholder="name@company.com"
-            value={email}
-            onChange={(event) => {
-              setEmail(event.target.value);
-              setError(null);
-            }}
-            aria-invalid={error ? true : undefined}
-            className="h-8 flex-1"
-          />
-          <Button type="submit" size="sm" variant="outline" disabled={pending || !email.trim()}>
-            {pending ? <Loader2Icon className="animate-spin" aria-hidden /> : null}
-            Add
-          </Button>
-        </form>
-      )}
-      {error && (
-        <p role="alert" className="mt-2 text-sm text-destructive">
-          {error}
-        </p>
-      )}
-      {guests.length > 0 && (
-        <ul className="mt-3 divide-y rounded-lg border">
-          {guests.map((guest) => (
-            <li key={guest} className="flex items-center gap-2 py-1.5 pr-1.5 pl-3 text-sm">
-              <span className="min-w-0 flex-1 truncate">{guest}</span>
-              <span className="text-xs text-muted-foreground">Can view</span>
-              <Button variant="ghost" size="icon-sm" aria-label={`Remove ${guest}`} onClick={() => remove(guest)} disabled={pending}>
-                <XIcon aria-hidden />
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </section>
-  );
 }
 
 /**

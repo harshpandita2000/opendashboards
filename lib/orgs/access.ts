@@ -1,7 +1,7 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, ne, or, sql } from "drizzle-orm";
 
 import type { Database } from "@/lib/db";
-import { appGuests, apps, orgMembers, users, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
+import { appGuests, appMembers, apps, orgMembers, users, type AppMemberAccess, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
 
 /**
  * Who may do what. Every permission question in OpenDashboards is answered
@@ -27,13 +27,37 @@ export const canManageConnections = (role: OrgRole) => role !== "viewer";
 /** Inviting and removing members, changing roles, renaming the org. */
 export const canManageMembers = (role: OrgRole) => role === "admin";
 
-/** A member's access to one app of their org, or null when they have none. */
-export function accessFor(app: { userId: string; teamAccess: AppTeamAccess }, userId: string, role: OrgRole): AppAccess | null {
+/**
+ * A member's access to one app of their org, or null when they have none.
+ * `own` is what the app gave them by name, if anything: they get the higher of
+ * that and what the whole workspace has.
+ */
+export function accessFor(
+  app: { userId: string; teamAccess: AppTeamAccess },
+  userId: string,
+  role: OrgRole,
+  own: AppMemberAccess | null = null,
+): AppAccess | null {
   if (app.userId === userId) return "owner";
-  if (app.teamAccess === "private") return null;
-  // The role is the ceiling: a viewer only views, whatever the app grants the team.
-  return app.teamAccess === "edit" && role !== "viewer" ? "edit" : "view";
+  if (app.teamAccess === "private" && !own) return null;
+  // The role is the ceiling: a viewer only views, whatever the app grants.
+  return (app.teamAccess === "edit" || own === "edit") && role !== "viewer" ? "edit" : "view";
 }
+
+/**
+ * Whether an app is open to this member of its workspace: it's theirs, it's
+ * shared with the workspace, or it was shared with them by name. For queries
+ * over `apps`; the caller checks they're a member of the app's org.
+ */
+export const appOpenTo = (userId: string) =>
+  or(
+    eq(apps.userId, userId),
+    ne(apps.teamAccess, "private"),
+    sql<boolean>`exists (select 1 from ${appMembers} where ${appMembers.appId} = ${apps.id} and ${appMembers.userId} = ${userId})`,
+  )!;
+
+/** The apps of an org this member can open. */
+export const appsOpenTo = ({ userId, orgId }: Scope) => and(eq(apps.orgId, orgId), appOpenTo(userId));
 
 /** Whether this access lets a member with this role change the app: build in it, rename it, edit its dashboards. */
 export const canChange = (access: AppAccess, role: OrgRole) => access !== "view" && canBuild(role);
@@ -63,22 +87,24 @@ export type AppGrant = {
 
 /**
  * What the user may do with an app, or null: it doesn't exist, or nothing
- * lets them in. A member of its workspace gets what their role and the app's
- * team access allow. Anyone else gets in only as a guest: to view, if the app
+ * lets them in. A member of its workspace gets what their role allows of what
+ * the app gives the workspace or gave them by name. Anyone else gets in only as a guest: to view, if the app
  * lists the email they signed in with. Looked up by the app's own workspace,
  * not the one the user has open, so a link to an app works from anywhere.
  */
 export async function appAccess(db: Database, userId: string, appId: string): Promise<AppGrant | null> {
   if (!isUuid(appId)) return null;
   const [row] = await db
-    .select({ orgId: apps.orgId, ownerId: apps.userId, teamAccess: apps.teamAccess, role: orgMembers.role })
+    .select({ orgId: apps.orgId, ownerId: apps.userId, teamAccess: apps.teamAccess, role: orgMembers.role, own: appMembers.access })
     .from(apps)
     .leftJoin(orgMembers, and(eq(orgMembers.orgId, apps.orgId), eq(orgMembers.userId, userId)))
+    // What the app gave them by name. It only counts through the membership above.
+    .leftJoin(appMembers, and(eq(appMembers.appId, apps.id), eq(appMembers.userId, userId)))
     .where(eq(apps.id, appId))
     .limit(1);
   if (!row?.orgId) return null;
   const { orgId, ownerId } = row;
-  const access = row.role ? accessFor({ userId: ownerId, teamAccess: row.teamAccess }, userId, row.role) : null;
+  const access = row.role ? accessFor({ userId: ownerId, teamAccess: row.teamAccess }, userId, row.role, row.own) : null;
   if (access && row.role) return { appId, orgId, ownerId, role: row.role, access, canChange: canChange(access, row.role), guest: false };
   // Not through the workspace: only as a guest of this app.
   if (!(await isGuest(db, userId, appId))) return null;

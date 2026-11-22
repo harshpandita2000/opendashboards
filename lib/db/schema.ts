@@ -221,6 +221,28 @@ export const appGuests = pgTable(
   (table) => [primaryKey({ columns: [table.appId, table.email] }), index("app_guests_email_idx").on(table.email)],
 );
 
+/** What one teammate was given on an app, apart from what the whole workspace has. */
+export const appMemberAccessEnum = pgEnum("app_member_access", ["view", "edit"]);
+
+/**
+ * A member of the app's workspace it was shared with by name: to view or to
+ * edit, whatever the rest of the workspace has. It only counts while they're
+ * a member, and their role is still the ceiling (a viewer never edits).
+ */
+export const appMembers = pgTable(
+  "app_members",
+  {
+    appId: uuid("app_id")
+      .notNull()
+      .references(() => apps.id, { onDelete: "cascade" }),
+    userId: text("user_id").notNull(),
+    access: appMemberAccessEnum("access").notNull(),
+    addedBy: text("added_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.userId] }), index("app_members_user_id_idx").on(table.userId)],
+);
+
 /** A dashboard in an app. Its content and versions live in OpenUI Cloud. */
 export const dashboards = pgTable(
   "dashboards",
@@ -297,4 +319,5 @@ export type DataConnectionRow = typeof dataConnections.$inferSelect;
 export type ConnectionStatus = (typeof connectionStatusEnum.enumValues)[number];
 export type OrgRole = (typeof orgRoleEnum.enumValues)[number];
 export type AppTeamAccess = (typeof appTeamAccessEnum.enumValues)[number];
+export type AppMemberAccess = (typeof appMemberAccessEnum.enumValues)[number];
 export type ConnectionSharing = (typeof connectionSharingEnum.enumValues)[number];

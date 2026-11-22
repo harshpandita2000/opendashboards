@@ -48,6 +48,11 @@ export const appGuestSchema = z
   })
   .strict();
 
+/** A teammate an app is shared with by name. The id is the auth provider's, checked against the workspace's members. */
+const memberIdSchema = z.string().min(1).max(200);
+export const appMemberSchema = z.object({ id: appIdSchema, memberId: memberIdSchema, access: z.enum(["view", "edit"]) }).strict();
+export const appMemberRefSchema = z.object({ id: appIdSchema, memberId: memberIdSchema }).strict();
+
 /** Who else in the workspace can open an app. */
 export const teamAccessSchema = z.object({ id: appIdSchema, teamAccess: z.enum(["private", "view", "edit"]) }).strict();
 export const addAppConnectionSchema = z.object({ appId: appIdSchema, connectionId: z.uuid() }).strict();

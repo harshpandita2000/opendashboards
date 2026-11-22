@@ -50,6 +50,7 @@ async function AppView({ params, children }: { params: Params; children: React.R
   const connections = app.canChange ? await getConnectionService().list({ userId: member.userId, orgId: app.orgId }) : [];
   const inApp = new Set(app.connections.map((connection) => connection.id));
   const guests = app.canChange ? await getAppService().guests(member.userId, app.id) : [];
+  const teammates = app.canChange ? await getAppService().teammates(member.userId, app.id) : [];
 
   return (
     <>
@@ -97,8 +98,10 @@ async function AppView({ params, children }: { params: Params; children: React.R
             <ShareApp
               app={{ id: app.id, name: app.name, teamAccess: app.teamAccess }}
               workspace={member.orgs.find((org) => org.id === app.orgId)?.name ?? "your workspace"}
+              owner={{ email: app.ownerEmail ?? "The owner", you: app.access === "owner" }}
               personalConnections={app.connections.filter((connection) => connection.sharing === "personal").length}
               guests={guests.map(({ email }) => email)}
+              teammates={teammates.map(({ userId, email, role, access }) => ({ id: userId, email: email ?? "Someone", viewer: role === "viewer", access }))}
               dashboardCount={app.dashboards.length}
             />
             <AppMenu

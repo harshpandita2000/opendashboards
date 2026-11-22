@@ -6,9 +6,10 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { createAppService } from "@/lib/apps/service";
 import { createThreadService } from "@/lib/apps/threads";
 import { createConnectionService } from "@/lib/connections/service";
+import { createOrgService } from "@/lib/orgs/service";
 import { createDashboardService } from "@/lib/dashboards/service";
 import { createDatabase } from "@/lib/db";
-import { apps, dataConnections, mcpOAuthSignIns, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
+import { appMembers, apps, dataConnections, mcpOAuthSignIns, orgMembers, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
 import { appGroups, cloudIdentity } from "@/lib/dashboards/cloud";
 import { accessFor, appAccess, canChange } from "@/lib/orgs/access";
 import { plaintextSecretBox } from "@/lib/secrets/plaintext";
@@ -21,6 +22,7 @@ import { workspaceOf, seedWorkspaces, seedTeam } from "./orgs";
 const { db, pool } = createDatabase(TEST_DATABASE_URL);
 const appsService = createAppService({ db });
 const threads = createThreadService({ db });
+const orgsService = createOrgService({ db });
 const dashboards = createDashboardService({ db });
 const connections = createConnectionService({
   db,
@@ -374,6 +376,160 @@ describe("a teammate's personal sign-in in a shared app", () => {
       ok: false,
       error: { code: "not_found" },
     });
+  });
+});
+
+describe("sharing an app with specific teammates", () => {
+  const share = (by: string, appId: string, memberId: string, access: "view" | "edit") =>
+    appsService.shareWithMember(by, { id: appId, memberId, access });
+
+  it("lets one teammate into a private app, to view or to edit, and nobody else", async () => {
+    const { appId } = await app("ed");
+    await seedTeam(db, "Acme", { alice: "admin", ed: "editor", vera: "viewer", eve: "editor" });
+    expect(await share("ed", appId, "eve", "view")).toEqual({ ok: true, data: undefined });
+
+    expect(await appAccess(db, "eve", appId)).toMatchObject({ access: "view", canChange: false, guest: false });
+    expect(await appsService.rename("eve", { id: appId, name: "Mine" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await threads.register("eve", appId, { threadId: "thread_e", title: "Hi" })).toMatchObject({ ok: false });
+    // Still private to everyone else, the admin included.
+    expect(await appAccess(db, "alice", appId)).toBeNull();
+    expect(await appAccess(db, "vera", appId)).toBeNull();
+    expect((await appsService.get("ed", appId))?.teamAccess).toBe("private");
+
+    // Changing what they have, in place.
+    expect(await share("ed", appId, "eve", "edit")).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "eve", appId)).toMatchObject({ access: "edit", canChange: true, guest: false });
+    expect(await appsService.rename("eve", { id: appId, name: "Ours" })).toEqual({ ok: true, data: undefined });
+    expect(await db.select().from(appMembers)).toHaveLength(1);
+    await db.delete(orgMembers).where(eq(orgMembers.userId, "eve"));
+  });
+
+  it("gives the higher of what they were given and what the workspace has", () => {
+    const theirs = { userId: "ed", teamAccess: "view" as AppTeamAccess };
+    expect(accessFor(theirs, "alice", "editor", "edit")).toBe("edit");
+    expect(accessFor({ ...theirs, teamAccess: "edit" }, "alice", "editor", "view")).toBe("edit");
+    expect(accessFor({ ...theirs, teamAccess: "private" }, "alice", "editor", "view")).toBe("view");
+    expect(accessFor({ ...theirs, teamAccess: "private" }, "alice", "editor", null)).toBeNull();
+    // The owner is the owner whatever a row says.
+    expect(accessFor(theirs, "ed", "editor", "view")).toBe("owner");
+  });
+
+  it("never lifts a viewer past viewing", async () => {
+    const { appId } = await app("ed");
+    expect(await share("ed", appId, "vera", "edit")).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await appAccess(db, "vera", appId)).toBeNull();
+    expect(await share("ed", appId, "vera", "view")).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "vera", appId)).toMatchObject({ access: "view", canChange: false });
+
+    // Someone given edit who is later made a viewer keeps the row, and only views.
+    await share("ed", appId, "alice", "edit");
+    await seedTeam(db, "Acme", { alice: "viewer" });
+    expect(accessFor({ userId: "ed", teamAccess: "private" }, "alice", "viewer", "edit")).toBe("view");
+    expect(await appAccess(db, "alice", appId)).toMatchObject({ access: "view", canChange: false });
+    expect(await appsService.rename("alice", { id: appId, name: "Mine" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+  });
+
+  it("is for whoever can change the app, and only names members of its workspace", async () => {
+    const { appId } = await app("ed");
+    // Nobody who can't open it, or can only view it.
+    expect(await share("alice", appId, "alice", "edit")).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(await share("mallory", appId, "mallory", "edit")).toMatchObject({ ok: false, error: { code: "not_found" } });
+    await share("ed", appId, "alice", "view");
+    expect(await share("alice", appId, "alice", "edit")).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await share("alice", appId, "vera", "view")).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.unshareWithMember("alice", { id: appId, memberId: "alice" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.teammates("alice", appId)).toEqual([]);
+
+    // Never someone outside the workspace, and never the owner.
+    expect(await share("ed", appId, "mallory", "view")).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await appAccess(db, "mallory", appId)).toBeNull();
+    expect(await share("ed", appId, "ed", "view")).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect(await share("ed", appId, "nobody", "view")).toMatchObject({ ok: false, error: { code: "validation" } });
+
+    // Someone given edit can share it on, like a shared document.
+    await share("ed", appId, "alice", "edit");
+    expect(await share("alice", appId, "vera", "view")).toEqual({ ok: true, data: undefined });
+    expect((await appsService.teammates("ed", appId)).map(({ userId, role, access }) => ({ userId, role, access }))).toEqual([
+      { userId: "alice", role: "admin", access: "edit" },
+      { userId: "vera", role: "viewer", access: "view" },
+    ]);
+    // The ones it isn't shared with yet are listed too, to pick from. Never the owner.
+    await appsService.unshareWithMember("ed", { id: appId, memberId: "vera" });
+    expect((await appsService.teammates("ed", appId)).map(({ userId, access }) => ({ userId, access }))).toEqual([
+      { userId: "alice", access: "edit" },
+      { userId: "vera", access: null },
+    ]);
+  });
+
+  it("shows the app in their workspace lists, and counts it as shared", async () => {
+    const { appId, connectionId } = await app("ed");
+    expect(await appsService.tree(inAcme("alice"))).toEqual([]);
+    await share("ed", appId, "alice", "edit");
+
+    expect((await appsService.list(inAcme("alice"))).map(({ id, mine }) => ({ id, mine }))).toEqual([{ id: appId, mine: false }]);
+    expect((await appsService.tree(inAcme("alice"))).map(({ id, mine, canChange }) => ({ id, mine, canChange }))).toEqual([
+      { id: appId, mine: false, canChange: true },
+    ]);
+    expect(await appsService.tree(inAcme("vera"))).toEqual([]);
+    expect((await appsService.get("ed", appId))?.teammateCount).toBe(1);
+    // It isn't a guest's app: it shows in the workspace, not under "Shared with you".
+    expect(await appsService.sharedWithGuest("alice")).toEqual([]);
+    // The connections page names it for them, and still hides it from the rest.
+    const usedBy = async (userId: string) => (await connections.list(inAcme(userId))).find((row) => row.id === connectionId)?.apps.map((row) => row.id);
+    expect(await usedBy("alice")).toEqual([appId]);
+    expect(await usedBy("vera")).toEqual([]);
+  });
+
+  it("tells OpenUI Cloud the group their access earns", async () => {
+    const { appId } = await app("ed");
+    const groups = appGroups(appId);
+    await share("ed", appId, "alice", "edit");
+    await share("ed", appId, "vera", "view");
+    const identity = async (userId: string) => cloudIdentity(userId, (await appAccess(db, userId, appId))!);
+    expect(await identity("alice")).toEqual({ userId: "alice", groupIds: [groups.edit] });
+    expect(await identity("vera")).toEqual({ userId: "vera", groupIds: [groups.view] });
+  });
+
+  it("ends when it's taken back, and when they leave the workspace", async () => {
+    const { appId } = await app("ed");
+    await share("ed", appId, "alice", "edit");
+    await share("ed", appId, "vera", "view");
+
+    expect(await appsService.unshareWithMember("ed", { id: appId, memberId: "vera" })).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "vera", appId)).toBeNull();
+
+    // Removed from the workspace: no access, and nothing waiting if they're added back.
+    await seedTeam(db, "Acme", { alice: "editor", ed: "admin", vera: "viewer" });
+    expect(await orgsService.removeMember("ed", { orgId: acme, userId: "alice" })).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "alice", appId)).toBeNull();
+    expect(await db.select().from(appMembers)).toEqual([]);
+    await seedTeam(db, "Acme", { alice: "editor" });
+    expect(await appAccess(db, "alice", appId)).toBeNull();
+
+    // Leaving does the same.
+    await share("ed", appId, "alice", "edit");
+    expect(await orgsService.leave("alice", { orgId: acme })).toEqual({ ok: true, data: undefined });
+    expect(await db.select().from(appMembers)).toEqual([]);
+  });
+
+  it("never reaches an app of another workspace through a row", async () => {
+    const { appId } = await app("ed");
+    // A row for someone who isn't a member counts for nothing.
+    await db.insert(appMembers).values({ appId, userId: "mallory", access: "edit", addedBy: "ed" });
+    expect(await appAccess(db, "mallory", appId)).toBeNull();
+    expect(await appsService.get("mallory", appId)).toBeNull();
+    expect(await appsService.tree(workspaceOf("mallory"))).toEqual([]);
+    expect(await appsService.list(inAcme("mallory"))).toEqual([]);
+    expect((await appsService.get("ed", appId))?.teammateCount).toBe(0);
+  });
+
+  it("keeps teammates out of the guest list", async () => {
+    const { appId } = await app("ed");
+    expect(await appsService.addGuest("ed", { id: appId, email: "Alice@example.com" })).toMatchObject({
+      ok: false,
+      error: { code: "validation", field: "email" },
+    });
+    expect(await appAccess(db, "alice", appId)).toBeNull();
   });
 });
 

@@ -1,8 +1,8 @@
-import { and, asc, count, eq, isNull, sql } from "drizzle-orm";
+import { and, asc, count, eq, inArray, isNull, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Database } from "@/lib/db";
-import { apps, dashboards, dataConnections, mcpOAuthSignIns, orgInvites, orgMembers, orgs, users, type OrgRole } from "@/lib/db/schema";
+import { appMembers, apps, dashboards, dataConnections, mcpOAuthSignIns, orgInvites, orgMembers, orgs, users, type OrgRole } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
 
 import { canManageMembers, isUuid, roleIn } from "./access";
@@ -87,6 +87,13 @@ export function createOrgService({ db, now = () => new Date() }: { db: Database;
       .from(orgMembers)
       .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.role, "admin")));
     return row?.admins ?? 0;
+  }
+
+  /** Someone who is no longer a member keeps nothing its apps gave them by name: joining again starts clean. */
+  async function forgetAppShares(orgId: string, userId: string): Promise<void> {
+    await db
+      .delete(appMembers)
+      .where(and(eq(appMembers.userId, userId), inArray(appMembers.appId, db.select({ id: apps.id }).from(apps).where(eq(apps.orgId, orgId)))));
   }
 
   /**
@@ -333,6 +340,7 @@ export function createOrgService({ db, now = () => new Date() }: { db: Database;
           .delete(orgMembers)
           .where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, memberId)))
           .returning({ userId: orgMembers.userId });
+        await forgetAppShares(orgId, memberId);
         return removed.length ? ok(undefined) : fail({ code: "not_found", message: "This person is no longer a member." });
       });
     },
@@ -353,6 +361,7 @@ export function createOrgService({ db, now = () => new Date() }: { db: Database;
           return fail({ code: "conflict", message: "You're the only admin. Make someone else an admin before you leave." });
         }
         await db.delete(orgMembers).where(and(eq(orgMembers.orgId, orgId), eq(orgMembers.userId, userId)));
+        await forgetAppShares(orgId, userId);
         return ok(undefined);
       });
     },

@@ -83,7 +83,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
    * until then.) If that fails, saving the app's Share dialog shares it again.
    */
   const shareCreated = async () => {
-    if (!turn.created.length || (app.teamAccess === "private" && app.guestCount === 0)) return;
+    if (!turn.created.length || (app.teamAccess === "private" && app.guestCount === 0 && app.teammateCount === 0)) return;
     if (!(await shareDashboardsWithApp(appId, turn.created))) logError("chat.shareCreated", new Error("New dashboards weren't shared with the app's groups"));
   };
 

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import { and, asc, eq, gt, isNull, lt, ne, or, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, lt, or, sql } from "drizzle-orm";
 
 import type { DemoDataset } from "@/config";
 import type { Database } from "@/lib/db";
@@ -15,7 +15,7 @@ import {
   type DataConnectionRow,
 } from "@/lib/db/schema";
 import { logError, logRejection, logWarning } from "@/lib/log";
-import { appAccess, canManageConnections, isUuid, roleIn, type Scope } from "@/lib/orgs/access";
+import { appAccess, appOpenTo, appsOpenTo, canManageConnections, isUuid, roleIn, type Scope } from "@/lib/orgs/access";
 import { count } from "@/lib/metrics";
 import type { SecretBox, SecretContext } from "@/lib/secrets";
 import { MAX_SECRET_BYTES, SecretTooLargeError, secretBytes, type SealedSecret } from "@/lib/secrets/types";
@@ -285,12 +285,12 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
   /** The apps that use a connection: the ones the caller can open by name, the rest as a count. */
   async function appsUsing(userId: string, connectionId: string) {
     const rows = await db
-      .select({ id: apps.id, name: apps.name, ownerId: apps.userId, teamAccess: apps.teamAccess })
+      .select({ id: apps.id, name: apps.name, open: sql<boolean>`${appOpenTo(userId)}` })
       .from(appConnections)
       .innerJoin(apps, eq(apps.id, appConnections.appId))
       .where(eq(appConnections.connectionId, connectionId))
       .orderBy(asc(apps.name));
-    const visible = rows.filter((app) => app.ownerId === userId || app.teamAccess !== "private");
+    const visible = rows.filter((app) => app.open);
     return { visible: visible.map(({ id, name }) => ({ id, name })), hidden: rows.length - visible.length };
   }
 
@@ -426,7 +426,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         .select({ id: apps.id, name: apps.name, connectionId: appConnections.connectionId })
         .from(appConnections)
         .innerJoin(apps, eq(apps.id, appConnections.appId))
-        .where(and(eq(apps.orgId, scope.orgId), or(eq(apps.userId, scope.userId), ne(apps.teamAccess, "private"))))
+        .where(appsOpenTo(scope))
         .orderBy(asc(apps.name));
 
       const summaries: ConnectionSummary[] = [];

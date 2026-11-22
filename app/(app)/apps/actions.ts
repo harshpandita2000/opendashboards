@@ -119,6 +119,39 @@ export async function removeAppGuestAction(input: unknown): Promise<AppResult> {
   return result;
 }
 
+const memberInput = z.object({ id: z.uuid(), memberId: z.string().min(1).max(200), access: z.enum(["view", "edit"]) }).strict();
+
+/**
+ * Shares an app with one teammate by name, to view or to edit, or changes
+ * what they have. Its dashboards are shared with the app's groups in OpenUI
+ * Cloud first (as when it's shared with the workspace), so they can load them.
+ */
+export async function shareAppWithMemberAction(input: unknown): Promise<AppResult> {
+  const user = await requireUser();
+  const parsed = memberInput.safeParse(input);
+  if (!parsed.success) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  const app = await getAppService().get(user.id, parsed.data.id);
+  if (!app) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  if (!app.canChange) return fail({ code: "forbidden", message: "You can view this app, but you can't change who it's shared with." });
+  const shared = await shareDashboardsWithApp(app.id, app.dashboards.map((dashboard) => dashboard.artifactId));
+  if (!shared) return fail({ code: "internal", message: "OpenUI Cloud couldn't share the app's dashboards. Nothing changed. Try again." });
+  const result = await getAppService().shareWithMember(user.id, parsed.data);
+  if (result.ok) {
+    // That it was shared with a teammate, never with whom.
+    track(user.id, "app_shared_with_member", { app_id: app.id, access: parsed.data.access });
+    revalidateShell();
+  }
+  return result;
+}
+
+/** Takes back what an app gave one teammate by name. For whoever can change the app. */
+export async function unshareAppWithMemberAction(input: unknown): Promise<AppResult> {
+  const user = await requireUser();
+  const result = await getAppService().unshareWithMember(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
 /** Adds a connection the user can query to an app. */
 export async function addAppConnectionAction(input: unknown): Promise<AppResult> {
   const user = await requireUser();

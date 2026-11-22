@@ -4,24 +4,29 @@ import type { Database } from "@/lib/db";
 import {
   appConnections,
   appGuests,
+  appMembers,
   apps,
   dashboards,
   dataConnections,
   orgMembers,
   users,
+  type AppMemberAccess,
   type AppTeamAccess,
+  type OrgRole,
   type ConnectionSharing,
   type ConnectionStatus,
 } from "@/lib/db/schema";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import { logError } from "@/lib/log";
-import { accessFor, appAccess, canBuild, canChange, canManageMembers, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
+import { accessFor, appAccess, appsOpenTo, canBuild, canChange, canManageMembers, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
 
 import { fail, forbidden, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
 import {
   addAppConnectionSchema,
   appGuestSchema,
   appIdSchema,
+  appMemberRefSchema,
+  appMemberSchema,
   appRefSchema,
   createAppSchema,
   renameAppSchema,
@@ -45,6 +50,12 @@ export type AppSummary = {
 /** Someone outside the workspace who may view an app. */
 export type AppGuest = { email: string; invitedBy: string | null; invitedAt: Date };
 
+/**
+ * A member of the app's workspace, other than its owner, as the Share dialog
+ * lists them: what the app gave them by name, if anything.
+ */
+export type AppTeammate = { userId: string; email: string | null; role: OrgRole; access: AppMemberAccess | null };
+
 /** A guest of an app, as a workspace's admins see them: on which app. */
 export type WorkspaceGuest = AppGuest & { appId: string; appName: string };
 
@@ -66,6 +77,8 @@ export type AppDetail = {
   name: string;
   /** The org it belongs to. */
   orgId: string;
+  /** Its owner's email, for whoever shares it. */
+  ownerEmail: string | null;
   /** What the caller may do with it. */
   access: AppAccess;
   /** Whether the caller may build in it: chat, rename, change its dashboards. Never true for a viewer. */
@@ -74,6 +87,8 @@ export type AppDetail = {
   guest: boolean;
   /** How many people outside the workspace can view it. */
   guestCount: number;
+  /** How many teammates it's shared with by name. */
+  teammateCount: number;
   teamAccess: AppTeamAccess;
   pendingPrompt: string | null;
   /** The data sources picked for the pending prompt, by name. */
@@ -111,9 +126,8 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     }
   }
 
-  /** The apps of an org this member can open: their own, and the ones shared with the team. */
-  const visibleTo = ({ userId, orgId }: Scope) =>
-    and(eq(apps.orgId, orgId), or(eq(apps.userId, userId), ne(apps.teamAccess, "private")));
+  /** The apps of an org this member can open: their own, the ones shared with the team, and the ones shared with them by name. */
+  const visibleTo = appsOpenTo;
 
   /** The connections of an org this member can query: the org's, and their own sign-ins. */
   const usableBy = ({ userId, orgId }: Scope) =>
@@ -180,22 +194,27 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         .where(visibleTo(scope))
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       if (!appRows.length) return [];
+      const appIds = appRows.map((app) => app.id);
 
       const dashboardRows = await db
         .select({ appId: dashboards.appId, id: dashboards.id, title: dashboards.title })
         .from(dashboards)
-        .where(
-          inArray(
-            dashboards.appId,
-            appRows.map((app) => app.id),
-          ),
-        )
+        .where(inArray(dashboards.appId, appIds))
         .orderBy(asc(dashboards.position), asc(dashboards.createdAt));
+      // What each app gave this member by name.
+      const own = new Map(
+        (
+          await db
+            .select({ appId: appMembers.appId, access: appMembers.access })
+            .from(appMembers)
+            .where(and(eq(appMembers.userId, scope.userId), inArray(appMembers.appId, appIds)))
+        ).map((row) => [row.appId, row.access]),
+      );
 
       return appRows.map(({ userId: ownerId, teamAccess, ...app }) => ({
         ...app,
         mine: ownerId === scope.userId,
-        canChange: canChange(accessFor({ userId: ownerId, teamAccess }, scope.userId, role) ?? "view", role),
+        canChange: canChange(accessFor({ userId: ownerId, teamAccess }, scope.userId, role, own.get(app.id) ?? null) ?? "view", role),
         dashboards: dashboardRows
           .filter((dashboard) => dashboard.appId === app.id)
           .map(({ id, title }) => ({ id, title })),
@@ -241,7 +260,13 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
             .orderBy(asc(dataConnections.name))
         : [];
 
+      const [ownedBy] = await db.select({ email: users.email }).from(users).where(eq(users.id, grant.ownerId)).limit(1);
       const [{ guestCount }] = await db.select({ guestCount: count() }).from(appGuests).where(eq(appGuests.appId, app.id));
+      const [{ teammateCount }] = await db
+        .select({ teammateCount: count() })
+        .from(appMembers)
+        .innerJoin(orgMembers, and(eq(orgMembers.orgId, grant.orgId), eq(orgMembers.userId, appMembers.userId)))
+        .where(eq(appMembers.appId, app.id));
       const badges = await connectionBadges([app.id]);
       // The servers the caller has signed in to themselves: a teammate's sign-in to the same server is covered by theirs.
       const others = badges.filter((badge) => badge.sharing === "personal" && badge.ownerId !== userId);
@@ -256,10 +281,12 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       return {
         ...rest,
         orgId: grant.orgId,
+        ownerEmail: ownedBy?.email ?? null,
         access: grant.access,
         canChange: grant.canChange,
         guest: grant.guest,
         guestCount,
+        teammateCount,
         pendingConnections,
         dashboards: appDashboards,
         connections: badges.map(({ id, name, type, status, config, sharing, ownerId }) => ({
@@ -358,6 +385,69 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /**
+     * The members of the app's workspace other than its owner, each with what
+     * the app gave them by name, for whoever can change it: the people already
+     * let in, and the ones who could be. Oldest member first.
+     */
+    async teammates(userId: string, appId: string): Promise<AppTeammate[]> {
+      const grant = await appAccess(db, userId, appId);
+      if (!grant?.canChange) return [];
+      return db
+        .select({ userId: orgMembers.userId, email: users.email, role: orgMembers.role, access: appMembers.access })
+        .from(orgMembers)
+        .leftJoin(users, eq(users.id, orgMembers.userId))
+        .leftJoin(appMembers, and(eq(appMembers.appId, appId), eq(appMembers.userId, orgMembers.userId)))
+        .where(and(eq(orgMembers.orgId, grant.orgId), ne(orgMembers.userId, grant.ownerId)))
+        .orderBy(asc(orgMembers.createdAt), asc(orgMembers.userId));
+    },
+
+    /**
+     * Shares the app with one teammate by name, to view or to edit, whatever
+     * the rest of the workspace has; or changes what they were given. For
+     * anyone who can change the app. Only a member of the app's workspace can
+     * be named, and never past their role: a viewer can be let in to view.
+     */
+    shareWithMember(userId: string, input: unknown): Promise<AppResult> {
+      return guard("shareWithMember", async () => {
+        const parsed = appMemberSchema.safeParse(input);
+        if (!parsed.success) return notFound();
+        const { id, memberId, access } = parsed.data;
+        const grant = await appAccess(db, userId, id);
+        if (!grant) return notFound();
+        if (!grant.canChange) return forbidden();
+        if (memberId === grant.ownerId) return fail({ code: "validation", field: "memberId", message: "The app's owner already has full access." });
+        const role = await roleIn(db, memberId, grant.orgId);
+        if (!role) return fail({ code: "validation", field: "memberId", message: "This person isn't in the workspace any more." });
+        if (access === "edit" && !canBuild(role)) {
+          return fail({
+            code: "validation",
+            field: "memberId",
+            message: "They're a viewer in this workspace, so they can only view. An admin can change their role.",
+          });
+        }
+        await db
+          .insert(appMembers)
+          .values({ appId: id, userId: memberId, access, addedBy: userId })
+          .onConflictDoUpdate({ target: [appMembers.appId, appMembers.userId], set: { access } });
+        return ok(undefined);
+      });
+    },
+
+    /** Takes back what the app gave one teammate by name. What the whole workspace has still applies to them. */
+    unshareWithMember(userId: string, input: unknown): Promise<AppResult> {
+      return guard("unshareWithMember", async () => {
+        const parsed = appMemberRefSchema.safeParse(input);
+        if (!parsed.success) return notFound();
+        const { id, memberId } = parsed.data;
+        const grant = await appAccess(db, userId, id);
+        if (!grant) return notFound();
+        if (!grant.canChange) return forbidden();
+        await db.delete(appMembers).where(and(eq(appMembers.appId, id), eq(appMembers.userId, memberId)));
+        return ok(undefined);
+      });
+    },
+
+    /**
      * The apps this user may view as a guest: listed by email on an app of a
      * workspace they aren't in. Most recently updated first.
      */
@@ -429,6 +519,16 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
             field: "email",
             message: `This app uses ${personal.map((connection) => connection.name).join(", ")} with a personal sign-in, which a guest can't query. Share that connection with the workspace, or remove it from the app, first.`,
           });
+        }
+        // A teammate is shared with by name, with the access that goes with it: never as a guest.
+        const [teammate] = await db
+          .select({ userId: orgMembers.userId })
+          .from(orgMembers)
+          .innerJoin(users, eq(users.id, orgMembers.userId))
+          .where(and(eq(orgMembers.orgId, grant.orgId), eq(users.email, email)))
+          .limit(1);
+        if (teammate) {
+          return fail({ code: "validation", field: "email", message: `${email} is in this workspace. Share with them under its people instead.` });
         }
         const [{ total }] = await db.select({ total: count() }).from(appGuests).where(eq(appGuests.appId, id));
         if (total >= MAX_GUESTS_PER_APP) {
