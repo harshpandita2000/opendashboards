@@ -16,7 +16,6 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import type { ConnectionField } from "@/lib/connections/errors";
 import { connectionNameSchema } from "@/lib/connections/schemas";
 import {
@@ -28,12 +27,12 @@ import {
   passwordSchema,
   POSTGRES_FLAVORS,
   postgresConfigSchema,
-  SSL_MODES,
   suggestConnectionName,
   type PostgresFlavor,
   type SslMode,
 } from "@/lib/sources/postgres/catalog";
 
+import { CertificateCheckField } from "./certificate-check-field";
 import { showConnectionWarnings } from "./connection-feedback";
 import type { SecretMode } from "./connection-form-dialog";
 
@@ -72,11 +71,6 @@ const EMPTY: Values = {
   sslMode: "verify-full",
 };
 
-const SSL_LABELS: Record<SslMode, string> = {
-  "verify-full": "Verify certificate",
-  require: "Encrypt only",
-};
-
 const READ_ONLY_ROLE_SQL = `CREATE ROLE dashboards_reader LOGIN PASSWORD '…';
 GRANT CONNECT ON DATABASE your_db TO dashboards_reader;
 GRANT USAGE ON SCHEMA public TO dashboards_reader;
@@ -105,7 +99,6 @@ export function PostgresFormDialog(props: Props) {
     database: useId(),
     user: useId(),
     password: useId(),
-    ssl: useId(),
   };
 
   const storageMissing = secretMode === "unconfigured";
@@ -167,7 +160,7 @@ export function PostgresFormDialog(props: Props) {
     const password = passwordSchema.safeParse(values.password);
     if (!password.success) errors.password = password.error.issues[0]?.message;
     // Hosted services always need one, and a login without it counts as a failed attempt there.
-    else if (!values.password && !replacing && flavorOf(values.host)) errors.password = "Enter your database password.";
+    else if (!values.password && !replacing && (flavor || flavorOf(values.host))) errors.password = "Enter your database password.";
     if (replacing) return errors;
     const name = connectionNameSchema.safeParse(values.name);
     if (!name.success) errors.name = name.error.issues[0]?.message;
@@ -331,34 +324,20 @@ export function PostgresFormDialog(props: Props) {
                 aria-invalid={!!fieldErrors.password || undefined}
                 autoFocus={replacing}
               />
-              <FieldDescription>Leave empty for a server that doesn&apos;t need one.</FieldDescription>
+              {/* Hosted services always need a password, so the hint would contradict the error for leaving it empty. */}
+              {!flavor && !flavorOf(values.host) && (
+                <FieldDescription>Leave empty for a server that doesn&apos;t need one.</FieldDescription>
+              )}
               <FieldError>{fieldErrors.password}</FieldError>
             </Field>
 
             {!replacing && (
-              <Field data-invalid={!!fieldErrors.sslMode || undefined}>
-                <FieldLabel id={ids.ssl}>SSL</FieldLabel>
-                <ToggleGroup
-                  type="single"
-                  variant="outline"
-                  aria-labelledby={ids.ssl}
-                  value={values.sslMode}
-                  onValueChange={(value) => value && update("sslMode", value as SslMode)}
-                  className="w-full"
-                >
-                  {SSL_MODES.map((mode) => (
-                    <ToggleGroupItem key={mode} value={mode} className="flex-1">
-                      {SSL_LABELS[mode]}
-                    </ToggleGroupItem>
-                  ))}
-                </ToggleGroup>
-                <FieldDescription>
-                  {values.sslMode === "verify-full"
-                    ? "Encrypted, and the server's certificate is checked. Recommended."
-                    : "Encrypted, but the certificate isn't checked. Use for self-signed certificates."}
-                </FieldDescription>
-                <FieldError>{fieldErrors.sslMode}</FieldError>
-              </Field>
+              <CertificateCheckField
+                value={values.sslMode}
+                onChange={(mode) => update("sslMode", mode)}
+                error={fieldErrors.sslMode}
+                presetReason={flavor?.sslMode === "require" ? `Still encrypted. On because ${flavor.label} uses its own certificate authority.` : undefined}
+              />
             )}
 
             {!replacing && (

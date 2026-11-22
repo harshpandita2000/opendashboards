@@ -33,7 +33,7 @@ export type PostgresErrorCode =
   | "ssl_unsupported"
   /** TLS failed: most often a certificate we couldn't verify. */
   | "tls_failed"
-  /** TLS failed although the certificate isn't checked ("Encrypt only"), so that setting can't fix it. */
+  /** TLS failed although the certificate isn't checked ("Skip certificate check"), so that setting can't fix it. */
   | "tls_handshake_failed"
   /** The SQL itself failed (syntax, unknown table, a write in a read-only query…); `detail` says why. */
   | "bad_query"
@@ -72,6 +72,23 @@ function supabasePoolerError(message: string): PostgresErrorCode | null {
   if (/\((EMAXCONN|ECHECKOUTTIMEOUT|EMAXPOOLSREACHED)\)|max clients? (connections )?reached|unable to check out connection from the pool|max pools count reached/i.test(message)) {
     return "too_many_connections";
   }
+  return null;
+}
+
+/**
+ * PgBouncer answers for the database until a login succeeds, and reports its own
+ * refusals as protocol violations (08P01) with the reason only in the message.
+ * The wording is from its source (src/client.c, src/objects.c, src/janitor.c).
+ */
+function pgbouncerError(message: string): PostgresErrorCode | null {
+  if (/no such database/i.test(message)) return "database_not_found";
+  // "no such user" too: newer versions answer an unknown user as a wrong password, so one message covers both.
+  if (/password authentication failed|SASL authentication failed|no such user|login rejected|"trust" authentication failed|empty password returned by client/i.test(message)) {
+    return "auth_failed";
+  }
+  if (/no more connections allowed|client connections exceeded|query_wait_timeout/i.test(message)) return "too_many_connections";
+  // It can't reach, or can't log in to, the database behind it.
+  if (/server login has been failing|pgbouncer cannot connect to server|client_login_timeout|server shutting down/i.test(message)) return "unreachable";
   return null;
 }
 
@@ -117,7 +134,7 @@ export function toPostgresError(error: unknown): PostgresError {
   if (NETWORK_UNREACHABLE.has(code)) return new PostgresError("unreachable", message);
   // The driver refuses to answer a password challenge (SCRAM) with an empty password.
   if (/client password must be/i.test(message)) return new PostgresError("password_required", message);
-  const pooler = supabasePoolerError(message);
+  const pooler = supabasePoolerError(message) ?? (code === "08P01" ? pgbouncerError(message) : null);
   if (pooler) return new PostgresError(pooler, message);
   // A pooler that refuses a connection setting. Named here so the word "timeout" in the setting's name isn't read as one.
   if (/unsupported startup parameter/i.test(message)) return new PostgresError("unexpected", message);

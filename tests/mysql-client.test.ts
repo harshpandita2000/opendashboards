@@ -179,7 +179,7 @@ describe.skipIf(!ports.length).each(ports)("against the server on port %i", (por
 /*
  * The whole path (guarded socket, TLS, read-only session) against Rfam's
  * public, read-only MySQL 8 server: LIVE_TESTS=1 pnpm test tests/mysql-client.test.ts
- * Its certificate isn't publicly trusted, so this uses "Encrypt only".
+ * Its certificate isn't publicly trusted, so this uses "Skip certificate check".
  */
 describe.skipIf(!process.env.LIVE_TESTS)("Rfam public MySQL (live)", () => {
   const rfam = { host: "mysql-rfam-public.ebi.ac.uk", port: 4497, database: "Rfam", user: "rfamro", password: "", sslMode: "require" as const };

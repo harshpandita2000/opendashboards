@@ -176,7 +176,7 @@ export const postgresSource: ConnectionSource<PostgresConfig> = {
           error: {
             code: "tls_failed",
             field: "sslMode",
-            message: "Couldn't set up an encrypted connection. If the server's certificate can't be verified, choose \"Encrypt only\".",
+            message: "Couldn't set up an encrypted connection. If the server's certificate can't be verified, turn on \"Skip certificate check\".",
           },
         };
       case "ssl_unsupported":

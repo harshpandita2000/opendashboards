@@ -106,11 +106,17 @@ export const clickhouseSource: ConnectionSource<ClickhouseConfig> = {
           field: "port",
           message: "This port doesn't answer over HTTPS, and OpenDashboards never connects without encryption. Use the server's HTTPS port (8443 on ClickHouse Cloud), not the plain HTTP one (8123).",
         });
+      case "tls_handshake_failed":
+        return invalid({
+          code: "tls_handshake_failed",
+          field: "sslMode",
+          message: "Couldn't set up HTTPS with this server, even without checking its certificate. Check that the port is its HTTPS interface (8443 on ClickHouse Cloud).",
+        });
       case "tls_failed":
         return invalid({
           code: "tls_failed",
           field: "sslMode",
-          message: "Couldn't set up HTTPS. Check the port serves HTTPS (not 8123, which is plain HTTP). If the certificate can't be verified, choose \"Encrypt only\".",
+          message: "Couldn't set up HTTPS. Check the port serves HTTPS (not 8123, which is plain HTTP). If the certificate can't be verified, turn on \"Skip certificate check\".",
         });
       case "timeout":
         return unavailable({

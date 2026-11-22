@@ -13,6 +13,8 @@ export type ClickhouseErrorCode =
   /** The port answers, but not with TLS: almost always the plain HTTP port. */
   | "ssl_unsupported"
   | "tls_failed"
+  /** TLS failed although the certificate isn't checked ("Skip certificate check"), so that setting can't fix it. */
+  | "tls_handshake_failed"
   /** The query tried to change something, or used something OpenDashboards doesn't allow. */
   | "read_only"
   /** The user may not read a table or use a function. */

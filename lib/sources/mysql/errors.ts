@@ -23,6 +23,8 @@ export type MysqlErrorCode =
   /** The server has TLS switched off. We never connect unencrypted, so it can't be used as it is. */
   | "ssl_unsupported"
   | "tls_failed"
+  /** TLS failed although the certificate isn't checked ("Skip certificate check"), so that setting can't fix it. */
+  | "tls_handshake_failed"
   /** The query tried to change something. */
   | "read_only"
   /** The SQL itself failed (syntax, unknown table or column, no access to a table…); `detail` says why. */

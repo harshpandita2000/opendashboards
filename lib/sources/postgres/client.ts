@@ -87,7 +87,7 @@ async function withReadOnly<T>(target: PostgresTarget, fn: (client: pg.Client) =
     return result;
   } catch (error) {
     const failure = toPostgresError(error);
-    // "Encrypt only" already skips the certificate check, so advice to choose it would lead nowhere.
+    // "Skip certificate check" already skips the certificate check, so advice to choose it would lead nowhere.
     const code = failure.code === "tls_failed" && target.sslMode === "require" ? "tls_handshake_failed" : failure.code;
     throw new PostgresError(code, failure.detail, flavorOf(target.host));
   } finally {

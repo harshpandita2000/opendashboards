@@ -11,9 +11,9 @@ import { Field, FieldDescription, FieldError, FieldGroup, FieldLabel } from "@/c
 import { Input } from "@/components/ui/input";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { connectionNameSchema } from "@/lib/connections/schemas";
-import { SSL_MODES, type SslMode } from "@/lib/sources/host";
 import { MCP_SERVICES, type McpAuth, type McpServiceKey } from "@/lib/sources/mcp/services";
 
+import { CertificateCheckField } from "./certificate-check-field";
 import { showConnectionWarnings } from "./connection-feedback";
 import type { SecretMode } from "./connection-form-dialog";
 import { mcpPresetForm, SOURCE_FORMS, type FieldSpec } from "./source-forms";
@@ -31,8 +31,6 @@ type Props = {
   | { mode: "create"; /** Called with the new connection's id once it's saved. */ onCreated?: (id: string) => void }
   | { mode: "replace"; connection: { id: string; name: string } }
 );
-
-const SSL_LABELS: Record<SslMode, string> = { "verify-full": "Verify certificate", require: "Encrypt only" };
 
 /** Adds a MySQL, ClickHouse or BigQuery connection, or replaces its password or key. */
 export function SourceFormDialog(props: Props) {
@@ -177,29 +175,12 @@ export function SourceFormDialog(props: Props) {
     const error = fieldErrors[field.name];
     if (field.kind === "ssl") {
       return (
-        <Field key={field.name} data-invalid={!!error || undefined}>
-          <FieldLabel id={id(field.name)}>{field.label}</FieldLabel>
-          <ToggleGroup
-            type="single"
-            variant="outline"
-            aria-labelledby={id(field.name)}
-            value={values[field.name]}
-            onValueChange={(value) => value && update(field.name, value)}
-            className="w-full"
-          >
-            {SSL_MODES.map((mode) => (
-              <ToggleGroupItem key={mode} value={mode} className="flex-1">
-                {SSL_LABELS[mode]}
-              </ToggleGroupItem>
-            ))}
-          </ToggleGroup>
-          <FieldDescription>
-            {values[field.name] === "verify-full"
-              ? "Encrypted, and the server's certificate is checked. Recommended."
-              : "Encrypted, but the certificate isn't checked. Use for self-signed certificates."}
-          </FieldDescription>
-          <FieldError>{error}</FieldError>
-        </Field>
+        <CertificateCheckField
+          key={field.name}
+          value={values[field.name] === "require" ? "require" : "verify-full"}
+          onChange={(mode) => update(field.name, mode)}
+          error={error}
+        />
       );
     }
     return (

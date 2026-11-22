@@ -102,6 +102,16 @@ describe("toPostgresError", () => {
     [Object.assign(new Error("Max client connections reached"), { code: "XX000" }), "too_many_connections"],
     [Object.assign(new Error("(ECHECKOUTTIMEOUT) unable to check out connection from the pool after 5000ms in Session mode"), { code: "XX000" }), "too_many_connections"],
     [{ code: "53300" }, "too_many_connections"],
+    // PgBouncer answers before the database does, always as 08P01.
+    [Object.assign(new Error("password authentication failed"), { code: "08P01" }), "auth_failed"],
+    [Object.assign(new Error("SASL authentication failed"), { code: "08P01" }), "auth_failed"],
+    [Object.assign(new Error("no such user"), { code: "08P01" }), "auth_failed"],
+    [Object.assign(new Error("no such database: shop"), { code: "08P01" }), "database_not_found"],
+    [Object.assign(new Error("no more connections allowed (max_client_conn)"), { code: "08P01" }), "too_many_connections"],
+    [Object.assign(new Error("client connections exceeded (max_user_client_connections)"), { code: "08P01" }), "too_many_connections"],
+    [Object.assign(new Error("query_wait_timeout"), { code: "08P01" }), "too_many_connections"],
+    [Object.assign(new Error("server login has been failing, cached error: connect failed (server_login_retry)"), { code: "08P01" }), "unreachable"],
+    [Object.assign(new Error("some other protocol violation"), { code: "08P01" }), "unexpected"],
     // The pooler's wrong-password error keeps Postgres's own code.
     [Object.assign(new Error('password authentication failed for user "postgres"'), { code: "28P01" }), "auth_failed"],
     // PgBouncer's wording: the setting's name must not be read as a timeout.
