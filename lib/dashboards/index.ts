@@ -1,6 +1,7 @@
 import "server-only";
 
 import {
+  OpenUIApiError,
   OpenUIClient,
   ToolExecutionError,
   type Dashboard,
@@ -130,6 +131,28 @@ export async function deleteAppDashboardsInCloud(userId: string, appId: string):
   const results = await Promise.allSettled(all.map(({ artifactId }) => deleteInCloud(userId, artifactId)));
   const failed = results.filter((result) => result.status === "rejected");
   for (const failure of failed) logError("dashboards.deleteApp", (failure as PromiseRejectedResult).reason);
+  return failed.length === 0;
+}
+
+/**
+ * Deletes dashboards in OpenUI Cloud with the API key, acting as the org:
+ * whoever made them. For deleting a whole workspace, where an admin removes
+ * every member's dashboards. One that's already gone counts as deleted.
+ * Returns false if any couldn't be deleted.
+ */
+export async function deleteDashboardsInCloud(artifactIds: string[]): Promise<boolean> {
+  const results = await Promise.allSettled(
+    artifactIds.map((artifactId) =>
+      getOpenUI()
+        .artifacts.delete(artifactId)
+        .catch((error) => {
+          if (error instanceof OpenUIApiError && error.status === 404) return;
+          throw error;
+        }),
+    ),
+  );
+  const failed = results.filter((result) => result.status === "rejected");
+  for (const failure of failed) logError("dashboards.deleteWorkspace", (failure as PromiseRejectedResult).reason);
   return failed.length === 0;
 }
 

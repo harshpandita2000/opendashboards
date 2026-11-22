@@ -1,0 +1,160 @@
+"use server";
+
+import { revalidatePath } from "next/cache";
+import { cookies } from "next/headers";
+import { redirect } from "next/navigation";
+
+import { config } from "@/config";
+import { track } from "@/lib/analytics";
+import { DEV_USER_COOKIE, DEV_USER_NAMES } from "@/lib/auth/providers/dev";
+import { requireUser } from "@/lib/auth/user";
+import { deleteDashboardsInCloud } from "@/lib/dashboards";
+import { getDb } from "@/lib/db";
+import { ACTIVE_ORG_COOKIE, getOrgService } from "@/lib/orgs";
+import { roleIn } from "@/lib/orgs/access";
+import { fail, type OrgResult } from "@/lib/orgs/errors";
+
+/*
+ * Public POST endpoints like every Server Action: each authenticates itself,
+ * and the service checks the caller's own role in the workspace before any change.
+ */
+
+const revalidateShell = () => revalidatePath("/", "layout");
+
+const YEAR_SECONDS = 60 * 60 * 24 * 365;
+
+async function openOrg(orgId: string) {
+  (await cookies()).set(ACTIVE_ORG_COOKIE, orgId, {
+    httpOnly: true,
+    sameSite: "lax",
+    path: "/",
+    maxAge: YEAR_SECONDS,
+    secure: config().env !== "local",
+  });
+}
+
+/** Opens one of the user's workspaces. The cookie is only a preference: every request checks membership again. */
+export async function switchOrgAction(orgId: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  if (typeof orgId !== "string" || !(await roleIn(getDb(), user.id, orgId))) {
+    return fail({ code: "not_found", message: "This workspace doesn't exist, or you aren't a member." });
+  }
+  await openOrg(orgId);
+  await getOrgService().markSeen(user.id, orgId);
+  revalidateShell();
+  return { ok: true, data: undefined };
+}
+
+/** Creates a workspace and opens it. */
+export async function createOrgAction(input: unknown): Promise<OrgResult<{ id: string }>> {
+  const user = await requireUser();
+  const result = await getOrgService().create(user, input);
+  if (!result.ok) return result;
+  await openOrg(result.data.id);
+  track(user.id, "workspace_created", { org_id: result.data.id, first: false });
+  revalidateShell();
+  return result;
+}
+
+/**
+ * For someone in no workspace: creates one named after them, in one click,
+ * and takes them into the app. Returns only on failure.
+ */
+export async function createFirstWorkspaceAction(): Promise<OrgResult<never>> {
+  const user = await requireUser();
+  const result = await getOrgService().create(user);
+  if (!result.ok) return result;
+  await openOrg(result.data.id);
+  track(user.id, "workspace_created", { org_id: result.data.id, first: true });
+  revalidateShell();
+  redirect("/apps");
+}
+
+export async function renameOrgAction(input: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  const result = await getOrgService().rename(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
+export async function inviteMemberAction(input: unknown): Promise<OrgResult<{ status: "added" | "invited" }>> {
+  const user = await requireUser();
+  const result = await getOrgService().invite(user.id, input);
+  if (result.ok) {
+    // The role and whether they already had an account: never the email.
+    track(user.id, "workspace_member_invited", { status: result.data.status, role: (input as { role?: unknown } | null)?.role ?? null });
+    revalidateShell();
+  }
+  return result;
+}
+
+export async function revokeInviteAction(input: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  const result = await getOrgService().revokeInvite(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
+export async function changeMemberRoleAction(input: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  const result = await getOrgService().changeRole(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
+export async function removeMemberAction(input: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  const result = await getOrgService().removeMember(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
+/** Leaves a workspace. Whichever of their others opens next; with none left, they're asked to create one. */
+export async function leaveOrgAction(input: unknown): Promise<OrgResult> {
+  const user = await requireUser();
+  const result = await getOrgService().leave(user.id, input);
+  if (!result.ok) return result;
+  (await cookies()).delete(ACTIVE_ORG_COOKIE);
+  revalidateShell();
+  return result;
+}
+
+/**
+ * Deletes a workspace and everything in it, for every member. Admins only,
+ * with its name retyped. Its dashboards are deleted in OpenUI Cloud first, so
+ * none are left behind; then the rest. Returns only on failure.
+ */
+export async function deleteOrgAction(input: unknown): Promise<OrgResult<never>> {
+  const user = await requireUser();
+  const orgs = getOrgService();
+  const plan = await orgs.dashboardsToDelete(user.id, input);
+  if (!plan.ok) return plan;
+  if (!(await deleteDashboardsInCloud(plan.data.artifactIds))) {
+    return fail({ code: "internal", message: "OpenUI Cloud couldn't delete some of the workspace's dashboards. Nothing else was deleted. Try again." });
+  }
+  const result = await orgs.remove(user.id, input);
+  if (!result.ok) return result;
+  track(user.id, "workspace_deleted", { dashboards: plan.data.artifactIds.length });
+  (await cookies()).delete(ACTIVE_ORG_COOKIE);
+  revalidateShell();
+  // Another of their workspaces opens; with none left, they're asked to create one.
+  redirect("/apps");
+}
+
+/**
+ * Local development only: acts as a stand-in person (or, with null, the
+ * configured dev user again), to try workspaces with more than one member.
+ * Anywhere else it does nothing: only the dev sign-in reads this cookie.
+ */
+export async function switchDevUserAction(name: unknown): Promise<void> {
+  if (config().env !== "local") return;
+  const store = await cookies();
+  if (typeof name === "string" && (DEV_USER_NAMES as readonly string[]).includes(name)) {
+    store.set(DEV_USER_COOKIE, name, { httpOnly: true, sameSite: "lax", path: "/" });
+  } else {
+    store.delete(DEV_USER_COOKIE);
+  }
+  // A different person has a different org open.
+  store.delete(ACTIVE_ORG_COOKIE);
+  revalidateShell();
+}

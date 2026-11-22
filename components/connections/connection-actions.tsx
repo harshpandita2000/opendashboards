@@ -1,6 +1,6 @@
 "use client";
 
-import { EllipsisIcon, KeyRoundIcon, Loader2Icon, PencilIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
+import { EllipsisIcon, KeyRoundIcon, Loader2Icon, LockIcon, PencilIcon, RefreshCwIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 
@@ -8,10 +8,12 @@ import {
   deleteConnectionAction,
   renameConnectionAction,
   retestConnectionAction,
+  setConnectionSharingAction,
   startMcpSignInAction,
 } from "@/app/(app)/connections/actions";
 import {
   AlertDialog,
+  AlertDialogAction,
   AlertDialogCancel,
   AlertDialogContent,
   AlertDialogDescription,
@@ -50,18 +52,36 @@ type Connection = {
   apps: { id: string; name: string }[];
   /** "oauth": signed in with OAuth, so it can be signed in to again instead of given a key. */
   signIn?: "oauth" | null;
+  /** Whether a sign-in serves only its owner or the whole workspace. */
+  sharing?: "personal" | "org";
+  /** Whether the person looking at it is who added it (for a sign-in: who signed in). */
+  mine?: boolean;
 };
 
-type OpenDialog = "replace" | "rename" | "delete" | null;
+type OpenDialog = "replace" | "rename" | "delete" | "share" | null;
 
 export function ConnectionActions({
   connection,
   secretMode,
+  team,
 }: {
   connection: Connection;
   secretMode: SecretMode;
+  /** The workspace this connection is in, by name, when it has other people. Null when there's nobody to share with. */
+  team?: string | null;
 }) {
   const [dialog, setDialog] = useState<OpenDialog>(null);
+  // A sign-in runs as one person, so only that person signs in again or decides who else it serves.
+  const ownSignIn = connection.signIn === "oauth" && connection.mine !== false;
+  const canShare = ownSignIn && Boolean(team);
+
+  function setSharing(sharing: "personal" | "org") {
+    startTest(async () => {
+      const result = await setConnectionSharingAction({ id: connection.id, sharing });
+      if (!result.ok) toast.error(result.error.message);
+      else toast.success(sharing === "org" ? `${connection.name} is shared with ${team}` : `${connection.name} is yours alone again`);
+    });
+  }
   const [testing, startTest] = useTransition();
 
   function signInAgain() {
@@ -96,16 +116,30 @@ export function ConnectionActions({
             Test again
           </DropdownMenuItem>
           {connection.signIn === "oauth" ? (
-            <DropdownMenuItem onSelect={signInAgain} disabled={testing}>
-              <KeyRoundIcon aria-hidden />
-              Sign in again
-            </DropdownMenuItem>
+            ownSignIn && (
+              <DropdownMenuItem onSelect={signInAgain} disabled={testing}>
+                <KeyRoundIcon aria-hidden />
+                Sign in again
+              </DropdownMenuItem>
+            )
           ) : (
             <DropdownMenuItem onSelect={() => setDialog("replace")}>
               <KeyRoundIcon aria-hidden />
               {["posthog", "bigquery", "ga4", "searchconsole", "mcp"].includes(connection.type) ? "Replace key" : "Change password"}
             </DropdownMenuItem>
           )}
+          {canShare &&
+            (connection.sharing === "org" ? (
+              <DropdownMenuItem onSelect={() => setSharing("personal")} disabled={testing}>
+                <LockIcon aria-hidden />
+                Stop sharing
+              </DropdownMenuItem>
+            ) : (
+              <DropdownMenuItem onSelect={() => setDialog("share")}>
+                <UsersIcon aria-hidden />
+                Share with workspace
+              </DropdownMenuItem>
+            ))}
           <DropdownMenuItem onSelect={() => setDialog("rename")}>
             <PencilIcon aria-hidden />
             Rename
@@ -144,6 +178,23 @@ export function ConnectionActions({
           secretMode={secretMode}
         />
       )}
+      <AlertDialog open={dialog === "share"} onOpenChange={close}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Share your {connection.name} sign-in with {team}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              Everyone in {team} will query {connection.name} as you, with whatever your account allows. They never see your
+              sign-in. Tools the server marks as changing data are skipped, but not every server marks them.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={() => setSharing("org")}>Share</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <RenameDialog connection={connection} open={dialog === "rename"} onOpenChange={close} />
       <DeleteDialog connection={connection} open={dialog === "delete"} onOpenChange={close} />
     </>

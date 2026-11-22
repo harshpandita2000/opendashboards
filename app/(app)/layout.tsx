@@ -35,6 +35,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
           <div className="shrink-0 border-t pt-2">
             <NavLink href="/connections" label="Data Connections" icon="connections" />
+            <NavLink href="/settings/members" label="Workspace" icon="team" />
           </div>
         </nav>
         <div className="mt-1 shrink-0">

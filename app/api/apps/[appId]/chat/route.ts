@@ -34,6 +34,11 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
   const runId = typeof parsed.data.runId === "string" ? parsed.data.runId : crypto.randomUUID();
   addLogContext({ thread: threadId, run: runId });
 
+  // Building is for members who can change the app: never a viewer, whatever the app grants the team.
+  const app = await getAppService().get(user.id, appId);
+  if (!app) throw new HttpError(404, "App not found");
+  if (!app.canChange) throw new HttpError(403, "You can view this app, but you can't build in it.");
+
   const threads = getThreadService();
   if (!(await threads.belongsTo(user.id, appId, threadId))) throw new HttpError(404, "Thread not found");
 
@@ -44,8 +49,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
     : undefined;
   const system: ChatCompletionMessageParam[] = [{ role: "system", content: SYSTEM_PROMPT }];
   // The data sources the user put in this app: the agent works from these unless asked otherwise.
-  const app = await getAppService().get(user.id, appId);
-  if (app?.connections.length) {
+  if (app.connections.length) {
     const list = app.connections.map((connection) => `${connection.name} (${connection.type}, id ${connection.id})`).join("; ");
     system.push({
       role: "system",
@@ -60,7 +64,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
   }
 
   const encoder = new TextEncoder();
-  const turn: TurnContext = { userId: user.id, appId, signal: request.signal, dashboards: [] };
+  const turn: TurnContext = { userId: user.id, appId, orgId: app.orgId, signal: request.signal, dashboards: [] };
 
   const startedAt = Date.now();
   const trackTurn = (outcome: string, cause: string, turnMessages: ChatCompletionMessageParam[]) => {

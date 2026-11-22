@@ -21,6 +21,7 @@ import { mcpSource, withCredential } from "@/lib/sources/mcp/source";
 import type { ConnectionSource, OpenConnection } from "@/lib/sources/types";
 
 import { TEST_DATABASE_URL } from "./global-setup";
+import { workspaceOf, seedWorkspaces } from "./orgs";
 
 /*
  * A fake authorization server and MCP resource server on https://127.0.0.1,
@@ -150,6 +151,7 @@ const deps = { service, testHooks: hooks, redirectUri: REDIRECT };
 beforeEach(async () => {
   mode = {};
   await db.execute(sql`TRUNCATE ${apps}, ${dataConnections}, ${mcpOAuthSignIns} CASCADE`);
+  await seedWorkspaces(db, ["alice", "mallory"]);
 });
 afterAll(() => pool.end());
 
@@ -183,7 +185,7 @@ describe("discovery", () => {
 
 describe("signing in", () => {
   it("starts with PKCE and the resource, finishes for the same user, and stores tokens sealed", async () => {
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!started.ok) throw new Error(started.error.code);
     const authorize = new URL(started.data.authorizationUrl);
     expect(authorize.origin + authorize.pathname).toBe(`${base}/authorize`);
@@ -207,7 +209,7 @@ describe("signing in", () => {
   });
 
   it("can't be finished twice", async () => {
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!started.ok) throw new Error(started.error.code);
     const params = approve(started.data.authorizationUrl);
     expect(await finishMcpSignIn("alice", params, deps)).toMatchObject({ ok: true });
@@ -215,7 +217,7 @@ describe("signing in", () => {
   });
 
   it("can't be finished by another user, and the owner still can", async () => {
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!started.ok) throw new Error(started.error.code);
     const params = approve(started.data.authorizationUrl);
     expect(await finishMcpSignIn("mallory", params, deps)).toMatchObject({ ok: false, error: { code: "oauth_expired" } });
@@ -226,7 +228,7 @@ describe("signing in", () => {
 
   it("expires", async () => {
     const quick = createConnectionService({ db, secrets: () => plaintextSecretBox, sources: () => mcpSource as unknown as ConnectionSource, signInTtlMs: 1 });
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, { ...deps, service: quick });
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, { ...deps, service: quick });
     if (!started.ok) throw new Error(started.error.code);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(await finishMcpSignIn("alice", approve(started.data.authorizationUrl), deps)).toMatchObject({ ok: false, error: { code: "oauth_expired" } });
@@ -234,7 +236,7 @@ describe("signing in", () => {
 
   it("refuses a callback from another authorization server, or without iss when it's promised", async () => {
     for (const iss of ["https://evil.example.com", null]) {
-      const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+      const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
       if (!started.ok) throw new Error(started.error.code);
       const params = approve(started.data.authorizationUrl);
       if (iss) params.set("iss", iss);
@@ -245,7 +247,7 @@ describe("signing in", () => {
   });
 
   it("uses up the sign-in when the user declines", async () => {
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!started.ok) throw new Error(started.error.code);
     const state = new URL(started.data.authorizationUrl).searchParams.get("state") ?? "";
     const declined = new URLSearchParams({ error: "access_denied", state });
@@ -255,23 +257,23 @@ describe("signing in", () => {
 
   it("says when a server can't register OpenDashboards automatically", async () => {
     mode = { registration: false };
-    expect(await startMcpSignIn("alice", { name: "GitHub", url: `${base}/mcp` }, deps)).toMatchObject({
+    expect(await startMcpSignIn(workspaceOf("alice"), { name: "GitHub", url: `${base}/mcp` }, deps)).toMatchObject({
       ok: false,
       error: { code: "oauth_unsupported" },
     });
   });
 
   it("signs in again to an existing connection, keeping its id", async () => {
-    const first = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const first = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!first.ok) throw new Error(first.error.code);
     const created = await finishMcpSignIn("alice", approve(first.data.authorizationUrl), deps);
     if (!created.ok) throw new Error(created.error.code);
-    const again = await startMcpSignIn("alice", { connectionId: created.data.id }, deps);
+    const again = await startMcpSignIn(workspaceOf("alice"), { connectionId: created.data.id }, deps);
     if (!again.ok) throw new Error(again.error.code);
     expect(await finishMcpSignIn("alice", approve(again.data.authorizationUrl), deps)).toMatchObject({ ok: true, data: { id: created.data.id } });
     expect(await db.select().from(dataConnections)).toHaveLength(1);
     // Someone else's connection can't be signed in to again.
-    expect(await startMcpSignIn("mallory", { connectionId: created.data.id }, deps)).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(await startMcpSignIn(workspaceOf("mallory"), { connectionId: created.data.id }, deps)).toMatchObject({ ok: false, error: { code: "not_found" } });
   });
 });
 
@@ -279,13 +281,13 @@ describe("coming back to where the sign-in started", () => {
   const APP = "/apps/0f8fad5b-d9cb-469f-a165-70867728950e/dashboards/7c9e6679-7425-40de-944b-e07fc1f90ae7";
 
   it("returns to the dashboard it was started from", async () => {
-    const first = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const first = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!first.ok) throw new Error(first.error.code);
     const created = await finishMcpSignIn("alice", approve(first.data.authorizationUrl), deps);
     if (!created.ok) throw new Error(created.error.code);
     expect(created.data.returnTo).toBeNull();
 
-    const again = await startMcpSignIn("alice", { connectionId: created.data.id, returnTo: APP }, deps);
+    const again = await startMcpSignIn(workspaceOf("alice"), { connectionId: created.data.id, returnTo: APP }, deps);
     if (!again.ok) throw new Error(again.error.code);
     expect(await finishMcpSignIn("alice", approve(again.data.authorizationUrl), deps)).toMatchObject({ ok: true, data: { returnTo: APP } });
   });
@@ -293,7 +295,7 @@ describe("coming back to where the sign-in started", () => {
   it.each(["https://evil.example.com/apps/x", "//evil.example.com", "/connections", "/apps/../connections", "/apps/not-an-id", `${APP}?next=https://evil.example.com`])(
     "refuses %j as a place to return to",
     async (returnTo) => {
-      expect(await startMcpSignIn("alice", { connectionId: "0f8fad5b-d9cb-469f-a165-70867728950e", returnTo }, deps)).toMatchObject({
+      expect(await startMcpSignIn(workspaceOf("alice"), { connectionId: "0f8fad5b-d9cb-469f-a165-70867728950e", returnTo }, deps)).toMatchObject({
         ok: false,
         error: { code: "validation" },
       });
@@ -303,7 +305,7 @@ describe("coming back to where the sign-in started", () => {
 
 describe("refreshing", () => {
   async function signedIn(): Promise<OpenConnection<McpConfig>> {
-    const started = await startMcpSignIn("alice", { name: "Linear", url: `${base}/mcp` }, deps);
+    const started = await startMcpSignIn(workspaceOf("alice"), { name: "Linear", url: `${base}/mcp` }, deps);
     if (!started.ok) throw new Error(started.error.code);
     const finished = await finishMcpSignIn("alice", approve(started.data.authorizationUrl), deps);
     if (!finished.ok) throw new Error(finished.error.code);

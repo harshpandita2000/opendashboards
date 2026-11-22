@@ -1,0 +1,76 @@
+CREATE TYPE "public"."app_team_access" AS ENUM('private', 'view', 'edit');--> statement-breakpoint
+CREATE TYPE "public"."connection_sharing" AS ENUM('personal', 'org');--> statement-breakpoint
+CREATE TYPE "public"."org_role" AS ENUM('admin', 'editor', 'viewer');--> statement-breakpoint
+CREATE TABLE "org_invites" (
+	"org_id" uuid NOT NULL,
+	"email" text NOT NULL,
+	"role" "org_role" NOT NULL,
+	"invited_by" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "org_invites_org_id_email_pk" PRIMARY KEY("org_id","email")
+);
+--> statement-breakpoint
+CREATE TABLE "org_members" (
+	"org_id" uuid NOT NULL,
+	"user_id" text NOT NULL,
+	"role" "org_role" NOT NULL,
+	"added_by" text,
+	"seen_at" timestamp with time zone,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
+	CONSTRAINT "org_members_org_id_user_id_pk" PRIMARY KEY("org_id","user_id")
+);
+--> statement-breakpoint
+CREATE TABLE "orgs" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"name" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+CREATE TABLE "users" (
+	"id" text PRIMARY KEY NOT NULL,
+	"email" text NOT NULL,
+	"created_at" timestamp with time zone DEFAULT now() NOT NULL
+);
+--> statement-breakpoint
+DROP INDEX "data_connections_user_demo_idx";--> statement-breakpoint
+ALTER TABLE "apps" ADD COLUMN "org_id" uuid;--> statement-breakpoint
+ALTER TABLE "apps" ADD COLUMN "team_access" "app_team_access" DEFAULT 'private' NOT NULL;--> statement-breakpoint
+ALTER TABLE "data_connections" ADD COLUMN "org_id" uuid;--> statement-breakpoint
+ALTER TABLE "data_connections" ADD COLUMN "sharing" "connection_sharing" DEFAULT 'org' NOT NULL;--> statement-breakpoint
+ALTER TABLE "mcp_oauth_sign_ins" ADD COLUMN "org_id" uuid;--> statement-breakpoint
+ALTER TABLE "org_invites" ADD CONSTRAINT "org_invites_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "org_members" ADD CONSTRAINT "org_members_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "org_invites_email_idx" ON "org_invites" USING btree ("email");--> statement-breakpoint
+CREATE INDEX "org_members_user_id_idx" ON "org_members" USING btree ("user_id");--> statement-breakpoint
+CREATE INDEX "users_email_idx" ON "users" USING btree ("email");--> statement-breakpoint
+ALTER TABLE "apps" ADD CONSTRAINT "apps_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "data_connections" ADD CONSTRAINT "data_connections_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "mcp_oauth_sign_ins" ADD CONSTRAINT "mcp_oauth_sign_ins_org_id_orgs_id_fk" FOREIGN KEY ("org_id") REFERENCES "public"."orgs"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+CREATE INDEX "apps_org_id_idx" ON "apps" USING btree ("org_id","updated_at");--> statement-breakpoint
+CREATE INDEX "data_connections_org_id_idx" ON "data_connections" USING btree ("org_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "data_connections_org_demo_idx" ON "data_connections" USING btree ("org_id","demo_dataset");--> statement-breakpoint
+-- Backfill (written by hand): everyone who had anything before workspaces gets
+-- a workspace of their own holding all of it, so nobody sees a change.
+CREATE TEMPORARY TABLE "_workspace_owners" ON COMMIT DROP AS
+SELECT owners.user_id, gen_random_uuid() AS org_id
+FROM (
+	SELECT "user_id" FROM "apps"
+	UNION SELECT "user_id" FROM "data_connections"
+	UNION SELECT "user_id" FROM "dashboards"
+	UNION SELECT "user_id" FROM "app_threads"
+	UNION SELECT "user_id" FROM "mcp_oauth_sign_ins"
+) AS owners;--> statement-breakpoint
+-- A placeholder name: it becomes "<name>'s workspace" the first time they sign in, when we learn their email.
+INSERT INTO "orgs" ("id", "name") SELECT "org_id", 'My workspace' FROM "_workspace_owners";--> statement-breakpoint
+INSERT INTO "org_members" ("org_id", "user_id", "role", "seen_at")
+SELECT "org_id", "user_id", 'admin', now() FROM "_workspace_owners";--> statement-breakpoint
+UPDATE "apps" SET "org_id" = o."org_id" FROM "_workspace_owners" o
+WHERE o."user_id" = "apps"."user_id" AND "apps"."org_id" IS NULL;--> statement-breakpoint
+-- A sign-in is its owner's alone until they share it; keys and passwords serve the workspace.
+UPDATE "data_connections" SET
+	"org_id" = o."org_id",
+	"sharing" = CASE WHEN "data_connections"."config" -> 'oauth' IS NOT NULL THEN 'personal'::"connection_sharing" ELSE 'org'::"connection_sharing" END
+FROM "_workspace_owners" o
+WHERE o."user_id" = "data_connections"."user_id" AND "data_connections"."org_id" IS NULL;--> statement-breakpoint
+UPDATE "mcp_oauth_sign_ins" SET "org_id" = o."org_id" FROM "_workspace_owners" o
+WHERE o."user_id" = "mcp_oauth_sign_ins"."user_id" AND "mcp_oauth_sign_ins"."org_id" IS NULL;

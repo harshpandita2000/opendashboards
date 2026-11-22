@@ -12,10 +12,12 @@ import { getAppService } from "@/lib/apps";
 import { getConnectionService } from "@/lib/connections";
 import { fail, type AppResult } from "@/lib/apps/errors";
 import { deleteAppDashboardsInCloud, deleteDashboard, getDashboardService } from "@/lib/dashboards";
+import { getAppGrant, requireMember } from "@/lib/orgs";
 
 /*
  * Public POST endpoints like every Server Action: each authenticates itself,
- * and the service validates input and scopes everything to the user.
+ * and the service validates input and checks what the user may do in the
+ * app's org.
  *
  * Successful changes revalidate the shared layout, not just the page: the
  * sidebar's "Recent" list shows app names too.
@@ -25,11 +27,13 @@ const revalidateShell = () => revalidatePath("/", "layout");
 
 /** Creates the app and opens it. Returns only on failure. */
 export async function createAppAction(input: unknown): Promise<AppResult<never>> {
-  const user = await requireUser();
-  const result = await getAppService().create(user.id, input);
+  // In the org the user has open.
+  const member = await requireMember();
+  const { user } = member;
+  const result = await getAppService().create(member, input);
   if (!result.ok) return result;
   const { prompt, connectionIds } = input as { prompt: string; connectionIds: string[] };
-  const connections = (await getConnectionService().list(user.id)).filter((connection) => connectionIds.includes(connection.id));
+  const connections = (await getConnectionService().list(member)).filter((connection) => connectionIds.includes(connection.id));
   track(user.id, "app_created", {
     app_id: result.data.id,
     connection_count: connections.length,
@@ -53,7 +57,7 @@ export async function renameAppAction(input: unknown): Promise<AppResult> {
   return result;
 }
 
-/** Adds one of the user's connections to an app. */
+/** Adds a connection the user can query to an app. */
 export async function addAppConnectionAction(input: unknown): Promise<AppResult> {
   const user = await requireUser();
   const result = await getAppService().addConnection(user.id, input);
@@ -86,7 +90,9 @@ export async function takePendingPromptAction(appId: string): Promise<string | n
   const user = await requireUser();
   const pending = await getAppService().takePendingPrompt(user.id, appId);
   if (!pending) return null;
-  const connections = (await getConnectionService().list(user.id)).filter((connection) =>
+  const grant = await getAppGrant(appId);
+  if (!grant) return pending.prompt;
+  const connections = (await getConnectionService().list({ userId: user.id, orgId: grant.orgId })).filter((connection) =>
     pending.connectionIds.includes(connection.id),
   );
   if (!connections.length) return pending.prompt;

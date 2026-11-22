@@ -141,6 +141,7 @@ export function AppWorkspace({
   builder,
   dashboards,
   notice,
+  readOnly = false,
   children,
 }: {
   appId: string;
@@ -149,11 +150,13 @@ export function AppWorkspace({
   menu: React.ReactNode;
   builder: React.ReactNode;
   dashboards: Dashboard[];
+  /** For someone who can only view the app: no Build panel and no renaming. */
+  readOnly?: boolean;
   /** Shown above the dashboard: a source that needs signing in again, say. */
   notice?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const [open, setOpenState] = useState(dashboards.length === 0);
+  const [open, setOpenState] = useState(!readOnly && dashboards.length === 0);
   // Opening unmounts the header's Build button and closing hides the panel, so
   // whichever had focus is gone: hand focus to the other side. Only when someone
   // toggles it, not when the workspace first shows.
@@ -207,11 +210,15 @@ export function AppWorkspace({
             >
               <ChevronLeftIcon className="size-4" aria-hidden />
             </Link>
-            <AppTitle appId={appId} name={name} renaming={renaming} onRenamingChange={setRenaming} />
+            {readOnly ? (
+              <h1 className="min-w-0 truncate px-1.5 py-1 text-sm font-semibold">{name}</h1>
+            ) : (
+              <AppTitle appId={appId} name={name} renaming={renaming} onRenamingChange={setRenaming} />
+            )}
             <div className="ml-1 hidden min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:flex">{badges}</div>
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {/* One Build control at a time: this opens the panel, and the panel's own header closes it. */}
-              {!open && (
+              {!open && !readOnly && (
                 <Button
                   ref={openButtonRef}
                   variant="outline"
@@ -243,7 +250,7 @@ export function AppWorkspace({
             // (a phone) it covers the app header too; as a 380px sheet it starts under
             // the header, so the app's menu and connections stay in reach.
             "absolute inset-y-0 right-0 z-10 w-full shadow-xl sm:top-12 sm:w-[380px] lg:relative lg:top-0 lg:shadow-none",
-            open ? "flex" : "hidden",
+            open && !readOnly ? "flex" : "hidden",
           )}
         >
           {/* The chat's thread bar is the panel's header: chat picker, new chat, and

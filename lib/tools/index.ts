@@ -16,8 +16,9 @@ import type { ConnectionSource, SourceTool, ToolCaller } from "@/lib/sources/typ
  * Sources write tools as "given an open connection, do X". This runner does
  * the rest, the same way for every source and every caller:
  *   1. validates the arguments against the tool's schema;
- *   2. takes the user and app from the server-side context, never from arguments;
- *   3. opens the `connection` id only if it's this user's, of the tool's type;
+ *   2. takes the user, app and org from the server-side context, never from arguments;
+ *   3. opens the `connection` id only if this user can query it, it's in the
+ *      app's org, and it's of the tool's type;
  *   4. runs the tool, and on success records that the app uses the connection
  *      (`app_connections`: connections are inferred from use).
  */
@@ -26,6 +27,8 @@ import type { ConnectionSource, SourceTool, ToolCaller } from "@/lib/sources/typ
 export type ToolContext = {
   userId: string;
   appId: string;
+  /** The app's org: its tools reach only that org's connections. */
+  orgId: string;
   /** Called when a call finds a sign-in expired or revoked (its connection is now marked so). */
   onSignInLost?: () => void;
 };
@@ -74,7 +77,7 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
       }
       const { connection: connectionId, ...toolArgs } = parsed.data;
 
-      const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType);
+      const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType, { orgId: context.orgId });
       if (!connection) throw new ToolError("connection_not_found", `No ${source.label} connection with id ${connectionId}.`);
 
       // Tool calls in one turn run concurrently, so each gets its own copy of the context.
@@ -111,7 +114,7 @@ const listConnections: Tool = {
   parameters: z.toJSONSchema(z.object({})),
   callers: ["agent"],
   async run(_args, context) {
-    const connections = await getConnectionService().list(context.userId);
+    const connections = await getConnectionService().list({ userId: context.userId, orgId: context.orgId });
     return connections.map(({ id, name, type, source, detail, status, demo }) => ({
       id,
       name,

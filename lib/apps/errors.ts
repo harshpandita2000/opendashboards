@@ -3,6 +3,7 @@ import type { z } from "zod";
 export type AppErrorCode =
   | "validation"
   | "not_found"
+  | "forbidden"
   | "thread_conflict"
   | "internal";
 
@@ -15,6 +16,10 @@ export const fail = (error: AppError): AppResult<never> => ({ ok: false, error }
 
 export const notFound = (): AppResult<never> =>
   fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+
+/** They can open it, but their role or access doesn't allow this. */
+export const forbidden = (message = "You can view this app, but you can't change it."): AppResult<never> =>
+  fail({ code: "forbidden", message });
 
 export const internalError = (): AppResult<never> =>
   fail({ code: "internal", message: "Something went wrong. Try again." });

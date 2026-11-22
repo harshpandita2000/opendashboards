@@ -10,6 +10,7 @@ const MAX_JSON_BYTES = 16 * 1024;
 const STATUS: Record<AppErrorCode, number> = {
   validation: 400,
   not_found: 404,
+  forbidden: 403,
   thread_conflict: 409,
   internal: 500,
 };

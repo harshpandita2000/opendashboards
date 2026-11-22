@@ -18,9 +18,9 @@ const requestSchema = z.object({
 const TIMEOUT_MS = 120_000;
 
 /**
- * Runs a live dashboard's data calls. The dashboard must be this user's, and
- * the app its tools record usage against comes from OpenDashboards' own record of
- * the dashboard, never from the request.
+ * Runs a live dashboard's data calls. The user must be able to open the
+ * dashboard's app, and the app and org its tools work in come from
+ * OpenDashboards' own record of the dashboard, never from the request.
  */
 export const POST = route(async (request, user) => {
   const parsed = requestSchema.safeParse(await readJson(request));
@@ -34,7 +34,7 @@ export const POST = route(async (request, user) => {
   // dashboard's script caught the error: the page then refreshes to show "Sign in again".
   let signInLost = false;
   const headers = (): HeadersInit => (signInLost ? { [SIGN_IN_LOST_HEADER]: "1" } : {});
-  const context = { userId: user.id, appId: dashboard.appId, onSignInLost: () => (signInLost = true) };
+  const context = { userId: user.id, appId: dashboard.appId, orgId: dashboard.grant.orgId, onSignInLost: () => (signInLost = true) };
 
   try {
     const result = await getDashboards().interpreter.execute(parsed.data, context, { signal: request.signal, timeoutMs: TIMEOUT_MS });

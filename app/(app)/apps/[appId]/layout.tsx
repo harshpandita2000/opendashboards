@@ -11,7 +11,8 @@ import { AppWorkspace } from "@/components/apps/app-workspace";
 import { BuildChat } from "@/components/apps/build-chat";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getCurrentUserApp, type AppDetail } from "@/lib/apps";
-import { requireUser } from "@/lib/auth/user";
+import { OpenAppOrg } from "@/components/shell/open-app-org";
+import { requireMember } from "@/lib/orgs";
 import { getConnectionService } from "@/lib/connections";
 
 /**
@@ -42,11 +43,16 @@ async function AppView({ params, children }: { params: Params; children: React.R
   const { appId } = await params;
   const app = await getCurrentUserApp(appId);
   if (!app) notFound();
-  const user = await requireUser();
-  const connections = await getConnectionService().list(user.id);
+  const member = await requireMember();
+  // The connections of the app's own org, whichever org the user had open.
+  const connections = app.canChange ? await getConnectionService().list({ userId: member.userId, orgId: app.orgId }) : [];
   const inApp = new Set(app.connections.map((connection) => connection.id));
+  // Signing in again is for whoever signed in: a teammate's sign-in isn't theirs to renew.
+  const ownSignIns = new Set(connections.filter((connection) => connection.mine).map((connection) => connection.id));
 
   return (
+    <>
+    {member.orgId !== app.orgId && <OpenAppOrg orgId={app.orgId} />}
     <AppWorkspace
       // A fresh workspace per app, so the Build panel's open/closed default applies to each.
       key={app.id}
@@ -55,12 +61,14 @@ async function AppView({ params, children }: { params: Params; children: React.R
       badges={
         <>
           <ConnectionBadges app={app} />
-          <AddAppConnection
-            appId={app.id}
-            connections={connections
-              .filter((connection) => !inApp.has(connection.id))
-              .map(({ id, name, shortSource, tile }) => ({ id, name, source: shortSource, tile }))}
-          />
+          {app.canChange && (
+            <AddAppConnection
+              appId={app.id}
+              connections={connections
+                .filter((connection) => !inApp.has(connection.id))
+                .map(({ id, name, shortSource, tile }) => ({ id, name, source: shortSource, tile }))}
+            />
+          )}
         </>
       }
       notice={
@@ -68,23 +76,28 @@ async function AppView({ params, children }: { params: Params; children: React.R
           <SignInResult />
           <SignInAgainBanner
             connections={app.connections
-              .filter((connection) => connection.signIn === "oauth" && connection.status === "invalid")
+              .filter((connection) => connection.signIn === "oauth" && connection.status === "invalid" && ownSignIns.has(connection.id))
               .map(({ id, name }) => ({ id, name }))}
           />
         </>
       }
-      menu={<AppMenu app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }} />}
+      // Viewing only: no Build panel, no rename, no menu. The server refuses those anyway.
+      readOnly={!app.canChange}
+      menu={app.canChange && <AppMenu app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }} />}
       builder={
-        <BuildChat
-          appId={app.id}
-          dashboards={app.dashboards.map(({ id, artifactId }) => ({ id, artifactId }))}
-          hasPendingPrompt={Boolean(app.pendingPrompt)}
-        />
+        app.canChange && (
+          <BuildChat
+            appId={app.id}
+            dashboards={app.dashboards.map(({ id, artifactId }) => ({ id, artifactId }))}
+            hasPendingPrompt={Boolean(app.pendingPrompt)}
+          />
+        )
       }
       dashboards={app.dashboards.map(({ id, title }) => ({ id, title }))}
     >
       {children}
     </AppWorkspace>
+    </>
   );
 }
 

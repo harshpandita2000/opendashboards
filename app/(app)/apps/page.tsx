@@ -8,9 +8,10 @@ import { Onboarding } from "@/components/onboarding/onboarding";
 import { SectionLabel } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getAppService, type AppSummary } from "@/lib/apps";
-import { requireUser } from "@/lib/auth/user";
 import { getConnectionService } from "@/lib/connections";
 import { formatRelative } from "@/lib/format";
+import { requireMember } from "@/lib/orgs";
+import { canBuild } from "@/lib/orgs/access";
 import { getSecretMode } from "@/lib/secrets";
 import { SOURCE_OPTIONS } from "@/lib/sources/catalog";
 
@@ -33,15 +34,14 @@ export default function AppsPage() {
 
 /** With no apps yet, onboarding takes the whole page; otherwise the composer and the apps. */
 async function Home() {
-  const user = await requireUser();
+  const member = await requireMember();
   const connectionService = getConnectionService();
-  const [apps, connections] = await Promise.all([
-    getAppService().list(user.id),
-    connectionService.list(user.id),
-  ]);
+  const [apps, connections] = await Promise.all([getAppService().list(member), connectionService.list(member)]);
 
+  // A viewer only opens what's shared with them: no composer, and nothing to set up.
+  if (!canBuild(member.role)) return <SharedApps apps={apps} />;
   if (!apps.length) {
-    const demos = await connectionService.listDemoDatasets(user.id);
+    const demos = await connectionService.listDemoDatasets(member);
     return (
       <Onboarding
         connections={connections.map(({ id, name, shortSource, tile, demo }) => ({
@@ -91,6 +91,33 @@ async function Home() {
         </ul>
       </section>
     </>
+  );
+}
+
+/** What a viewer sees in place of the composer: the apps their workspace shared with them. */
+function SharedApps({ apps }: { apps: AppSummary[] }) {
+  const now = new Date();
+  return (
+    <section aria-labelledby="shared-apps" className="relative mx-auto w-full max-w-7xl px-6 pt-20 pb-16">
+      <h1 id="shared-apps" className="text-3xl font-bold tracking-tight">
+        Shared with you
+      </h1>
+      <p className="mt-3 max-w-md text-[0.9375rem] text-muted-foreground">
+        You&apos;re a viewer in this workspace: you can open the apps it shares with you. Ask an admin to make you an editor to
+        build your own.
+      </p>
+      {apps.length ? (
+        <ul className="mt-10 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
+          {apps.map((app) => (
+            <li key={app.id}>
+              <AppCard app={app} now={now} />
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-10 text-sm text-muted-foreground">Nothing has been shared with you yet.</p>
+      )}
+    </section>
   );
 }
 

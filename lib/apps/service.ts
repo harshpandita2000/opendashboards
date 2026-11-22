@@ -1,4 +1,4 @@
-import { and, asc, count, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 
 import type { Database } from "@/lib/db";
 import {
@@ -6,12 +6,14 @@ import {
   apps,
   dashboards,
   dataConnections,
+  type AppTeamAccess,
   type ConnectionStatus,
 } from "@/lib/db/schema";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import { logError } from "@/lib/log";
+import { appAccess, canBuild, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
 
-import { fail, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
+import { fail, forbidden, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
 import { addAppConnectionSchema, appIdSchema, appRefSchema, createAppSchema, renameAppSchema } from "./schemas";
 
 export type AppConnectionBadge = { id: string; name: string };
@@ -22,6 +24,8 @@ export type AppSummary = {
   updatedAt: Date;
   dashboardCount: number;
   connections: AppConnectionBadge[];
+  /** Whether the caller owns it; otherwise it was shared with their team. */
+  mine: boolean;
 };
 
 export type AppTreeNode = { id: string; name: string; dashboards: { id: string; title: string }[] };
@@ -29,6 +33,13 @@ export type AppTreeNode = { id: string; name: string; dashboards: { id: string; 
 export type AppDetail = {
   id: string;
   name: string;
+  /** The org it belongs to. */
+  orgId: string;
+  /** What the caller may do with it. */
+  access: AppAccess;
+  /** Whether the caller may build in it: chat, rename, change its dashboards. Never true for a viewer. */
+  canChange: boolean;
+  teamAccess: AppTeamAccess;
   pendingPrompt: string | null;
   /** The data sources picked for the pending prompt, by name. */
   pendingConnections: AppConnectionBadge[];
@@ -39,19 +50,11 @@ export type AppDetail = {
 };
 
 /**
- * The data access layer for apps. Like connections, every query is scoped to
- * the caller's user id: another user's app looks exactly like a missing one.
+ * The data access layer for apps. An app belongs to an org and has an owner.
+ * Who may see or change it is decided by lib/orgs/access, from the database:
+ * an app the caller can't open looks exactly like a missing one.
  */
 export function createAppService({ db, now = () => new Date() }: { db: Database; now?: () => Date }) {
-  async function owns(userId: string, appId: string) {
-    const [row] = await db
-      .select({ id: apps.id })
-      .from(apps)
-      .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
-      .limit(1);
-    return Boolean(row);
-  }
-
   async function guard<T>(operation: string, fn: () => Promise<AppResult<T>>): Promise<AppResult<T>> {
     try {
       return await fn();
@@ -60,6 +63,14 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       return internalError();
     }
   }
+
+  /** The apps of an org this member can open: their own, and the ones shared with the team. */
+  const visibleTo = ({ userId, orgId }: Scope) =>
+    and(eq(apps.orgId, orgId), or(eq(apps.userId, userId), ne(apps.teamAccess, "private")));
+
+  /** The connections of an org this member can query: the org's, and their own sign-ins. */
+  const usableBy = ({ userId, orgId }: Scope) =>
+    and(eq(dataConnections.orgId, orgId), or(eq(dataConnections.sharing, "org"), eq(dataConnections.userId, userId)));
 
   async function connectionBadges(appIds: string[]) {
     if (!appIds.length) return [];
@@ -79,25 +90,28 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
   }
 
   const service = {
-    /** The user's apps, most recently updated first. */
-    async list(userId: string, { limit }: { limit?: number } = {}): Promise<AppSummary[]> {
+    /** The apps in the org the member can open, most recently updated first. */
+    async list(scope: Scope, { limit }: { limit?: number } = {}): Promise<AppSummary[]> {
+      if (!(await roleIn(db, scope.userId, scope.orgId))) return [];
       const query = db
         .select({
           id: apps.id,
           name: apps.name,
           updatedAt: apps.updatedAt,
+          ownerId: apps.userId,
           dashboardCount: count(dashboards.id),
         })
         .from(apps)
         .leftJoin(dashboards, eq(dashboards.appId, apps.id))
-        .where(eq(apps.userId, userId))
+        .where(visibleTo(scope))
         .groupBy(apps.id)
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       const rows = limit ? await query.limit(limit) : await query;
 
       const badges = await connectionBadges(rows.map((row) => row.id));
-      return rows.map((row) => ({
+      return rows.map(({ ownerId, ...row }) => ({
         ...row,
+        mine: ownerId === scope.userId,
         connections: badges
           .filter((badge) => badge.appId === row.id)
           .map(({ id, name }) => ({ id, name })),
@@ -105,18 +119,24 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /** Apps with their dashboards' titles, for the sidebar tree. Newest app first. */
-    async tree(userId: string): Promise<AppTreeNode[]> {
+    async tree(scope: Scope): Promise<AppTreeNode[]> {
+      if (!(await roleIn(db, scope.userId, scope.orgId))) return [];
       const appRows = await db
         .select({ id: apps.id, name: apps.name })
         .from(apps)
-        .where(eq(apps.userId, userId))
+        .where(visibleTo(scope))
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       if (!appRows.length) return [];
 
       const dashboardRows = await db
         .select({ appId: dashboards.appId, id: dashboards.id, title: dashboards.title })
         .from(dashboards)
-        .where(eq(dashboards.userId, userId))
+        .where(
+          inArray(
+            dashboards.appId,
+            appRows.map((app) => app.id),
+          ),
+        )
         .orderBy(asc(dashboards.position), asc(dashboards.createdAt));
 
       return appRows.map((app) => ({
@@ -128,18 +148,20 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     async get(userId: string, appId: string): Promise<AppDetail | null> {
-      if (!appIdSchema.safeParse(appId).success) return null;
+      const grant = await appAccess(db, userId, appId);
+      if (!grant) return null;
       const [app] = await db
         .select({
           id: apps.id,
           name: apps.name,
+          teamAccess: apps.teamAccess,
           pendingPrompt: apps.pendingPrompt,
           pendingConnectionIds: apps.pendingConnectionIds,
           createdAt: apps.createdAt,
           updatedAt: apps.updatedAt,
         })
         .from(apps)
-        .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
+        .where(eq(apps.id, appId))
         .limit(1);
       if (!app) return null;
 
@@ -160,7 +182,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         ? await db
             .select({ id: dataConnections.id, name: dataConnections.name })
             .from(dataConnections)
-            .where(and(eq(dataConnections.userId, userId), inArray(dataConnections.id, pendingIds)))
+            .where(and(usableBy({ userId, orgId: grant.orgId }), inArray(dataConnections.id, pendingIds)))
             .orderBy(asc(dataConnections.name))
         : [];
 
@@ -168,6 +190,9 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       const { pendingConnectionIds: _ids, ...rest } = app;
       return {
         ...rest,
+        orgId: grant.orgId,
+        access: grant.access,
+        canChange: grant.canChange,
         pendingConnections,
         dashboards: appDashboards,
         connections: badges.map(({ id, name, type, status, config }) => ({
@@ -182,20 +207,24 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /**
-     * Creates an app from the prompt typed on the home page, with the data
-     * sources picked in the composer. Every source must be the user's own.
+     * Creates an app in the org from the prompt typed on the home page, with
+     * the data sources picked in the composer. The caller owns it, and it
+     * starts private. Every source must be one they can query in that org.
      */
-    create(userId: string, input: unknown): Promise<AppResult<{ id: string }>> {
+    create(scope: Scope, input: unknown): Promise<AppResult<{ id: string }>> {
       return guard("create", async () => {
+        const role = await roleIn(db, scope.userId, scope.orgId);
+        if (!role) return notFound();
+        if (!canBuild(role)) return forbidden();
         const parsed = createAppSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
         const { prompt, connectionIds } = parsed.data;
 
-        const owned = await db
+        const usable = await db
           .select({ id: dataConnections.id, name: dataConnections.name })
           .from(dataConnections)
-          .where(and(eq(dataConnections.userId, userId), inArray(dataConnections.id, connectionIds)));
-        if (owned.length !== connectionIds.length) {
+          .where(and(usableBy(scope), inArray(dataConnections.id, connectionIds)));
+        if (usable.length !== connectionIds.length) {
           return fail({
             code: "validation",
             field: "connectionIds",
@@ -204,12 +233,16 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         }
 
         // Named after its data sources, in the order they were picked; the user renames it.
-        const sources = connectionIds.map((id) => owned.find((row) => row.id === id)!.name);
-        const taken = await db.select({ name: apps.name }).from(apps).where(eq(apps.userId, userId));
+        const sources = connectionIds.map((id) => usable.find((row) => row.id === id)!.name);
+        const taken = await db
+          .select({ name: apps.name })
+          .from(apps)
+          .where(and(eq(apps.orgId, scope.orgId), eq(apps.userId, scope.userId)));
         const [app] = await db
           .insert(apps)
           .values({
-            userId,
+            userId: scope.userId,
+            orgId: scope.orgId,
             name: appName(sources, taken.map((row) => row.name)),
             pendingPrompt: prompt,
             pendingConnectionIds: connectionIds,
@@ -225,10 +258,13 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       return guard("rename", async () => {
         const parsed = renameAppSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
+        const grant = await appAccess(db, userId, parsed.data.id);
+        if (!grant) return notFound();
+        if (!grant.canChange) return forbidden();
         const updated = await db
           .update(apps)
           .set({ name: parsed.data.name, updatedAt: now() })
-          .where(and(eq(apps.id, parsed.data.id), eq(apps.userId, userId)))
+          .where(eq(apps.id, parsed.data.id))
           .returning({ id: apps.id });
         return updated.length ? ok(undefined) : notFound();
       });
@@ -236,17 +272,17 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 
     /**
      * Deletes the app and, through the foreign keys, its dashboards, thread
-     * mappings and connection usage. Deleting the Cloud dashboards and
-     * conversations comes with the chat milestone.
+     * mappings and connection usage. Only its owner can. The caller deletes
+     * its dashboards in OpenUI Cloud first.
      */
     remove(userId: string, input: unknown): Promise<AppResult> {
       return guard("remove", async () => {
         const parsed = appRefSchema.safeParse(input);
         if (!parsed.success) return notFound();
-        const deleted = await db
-          .delete(apps)
-          .where(and(eq(apps.id, parsed.data.id), eq(apps.userId, userId)))
-          .returning({ id: apps.id });
+        const grant = await appAccess(db, userId, parsed.data.id);
+        if (!grant) return notFound();
+        if (grant.access !== "owner") return forbidden("Only the app's owner can delete it.");
+        const deleted = await db.delete(apps).where(eq(apps.id, parsed.data.id)).returning({ id: apps.id });
         return deleted.length ? ok(undefined) : notFound();
       });
     },
@@ -254,7 +290,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     /**
      * Returns the pending prompt and its data sources, clearing both in one
      * statement, so the chat sends them as the first message exactly once.
-     * For the chat milestone.
+     * Only for the owner, who typed it.
      */
     async takePendingPrompt(
       userId: string,
@@ -279,7 +315,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       return { prompt: row.pending_prompt, connectionIds: row.pending_connection_ids ?? [] };
     },
 
-    /** Adds one of the user's connections to an app, so it shows there and the agent uses it. */
+    /** Adds a connection the caller can query to an app, so it shows there and the agent uses it. */
     addConnection(userId: string, input: unknown): Promise<AppResult> {
       const parsed = addAppConnectionSchema.safeParse(input);
       if (!parsed.success) return Promise.resolve(notFound());
@@ -287,21 +323,24 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /**
-     * Records that an app's dashboards use a connection. Both must belong to
-     * the user. The server calls it when a dashboard queries a connection;
-     * the browser never can. For the chat milestone.
+     * Records that an app's dashboards use a connection. The caller must be
+     * able to change the app and to query the connection, and both must be in
+     * the same org. The server calls it when the Build agent queries a
+     * connection; the browser never can.
      */
     recordConnectionUse(userId: string, appId: string, connectionId: string): Promise<AppResult> {
       return guard("recordConnectionUse", async () => {
         if (!appIdSchema.safeParse(appId).success || !appIdSchema.safeParse(connectionId).success) {
           return notFound();
         }
+        const grant = await appAccess(db, userId, appId);
+        if (!grant?.canChange) return notFound();
         const [connection] = await db
           .select({ id: dataConnections.id })
           .from(dataConnections)
-          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.userId, userId)))
+          .where(and(eq(dataConnections.id, connectionId), usableBy({ userId, orgId: grant.orgId })))
           .limit(1);
-        if (!connection || !(await owns(userId, appId))) return notFound();
+        if (!connection) return notFound();
 
         await db.insert(appConnections).values({ appId, connectionId }).onConflictDoNothing();
         return ok(undefined);

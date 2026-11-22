@@ -1,4 +1,4 @@
-import { KeyRoundIcon, PlugIcon } from "lucide-react";
+import { KeyRoundIcon, LockIcon, PlugIcon, UsersIcon } from "lucide-react";
 import type { Metadata } from "next";
 import { Suspense } from "react";
 
@@ -11,10 +11,11 @@ import { SourceTile } from "@/components/connections/source-tile";
 import { UsedBy } from "@/components/connections/used-by";
 import { EmptyState, PageHeader, SectionLabel } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { requireUser } from "@/lib/auth/user";
 import { getConnectionService, type ConnectionSummary, type DemoDatasetSummary } from "@/lib/connections";
 import type { ConnectionStatus } from "@/lib/db/schema";
 import { formatRelative } from "@/lib/format";
+import { getOrgService, requireMember } from "@/lib/orgs";
+import { canManageConnections } from "@/lib/orgs/access";
 import { getSecretMode } from "@/lib/secrets";
 import { cn } from "@/lib/utils";
 
@@ -36,9 +37,17 @@ export default function ConnectionsPage() {
 
 /** Reads the user and their connections, so it streams in behind the boundary. */
 async function ConnectionsContent() {
-  const user = await requireUser();
+  const member = await requireMember();
   const service = getConnectionService();
-  const [all, demos] = await Promise.all([service.list(user.id), service.listDemoDatasets(user.id)]);
+  const [all, demos, org] = await Promise.all([
+    service.list(member),
+    service.listDemoDatasets(member),
+    getOrgService().get(member.userId, member.orgId),
+  ]);
+  // Who serves whom only matters once someone else is here (or is about to be): alone, there's nobody to share with.
+  const shared = (org?.members.length ?? 1) + (org?.invites.length ?? 0) > 1;
+  const team = shared ? member.orgName : null;
+  const canManage = canManageConnections(member.role);
   // Installed demo datasets are listed with their switch below, not here.
   const connections = all.filter((connection) => !connection.demo);
   const secretMode = getSecretMode();
@@ -48,12 +57,12 @@ async function ConnectionsContent() {
     <>
       <SignInResult />
       <section aria-labelledby="your-connections">
-        <SectionLabel id="your-connections">Your connections</SectionLabel>
+        <SectionLabel id="your-connections">{team ? `Connections in ${team}` : "Your connections"}</SectionLabel>
         {connections.length === 0 ? (
           <EmptyState
             icon={PlugIcon}
             title="No connections yet"
-            description="Add a source below to get started."
+            description={canManage ? "Add a source below to get started." : "An editor or admin of this workspace can add one."}
           />
         ) : (
           <ul className="divide-y rounded-xl border">
@@ -63,18 +72,26 @@ async function ConnectionsContent() {
                 connection={connection}
                 secretMode={secretMode}
                 now={now}
+                team={team}
               />
             ))}
           </ul>
         )}
       </section>
 
-      <section aria-labelledby="add-connection" className="mt-10">
-        <SectionLabel id="add-connection">Add a connection</SectionLabel>
-        <ConnectorCatalog secretMode={secretMode} />
-      </section>
+      {canManage && (
+        <section aria-labelledby="add-connection" className="mt-10">
+          <SectionLabel id="add-connection">Add a connection</SectionLabel>
+          {team && (
+            <p className="-mt-1 mb-3 text-sm text-muted-foreground">
+              A key or password serves everyone in {team}. A sign-in is yours alone until you share it.
+            </p>
+          )}
+          <ConnectorCatalog secretMode={secretMode} />
+        </section>
+      )}
 
-      {demos.length > 0 && (
+      {canManage && demos.length > 0 && (
         <section aria-labelledby="demo-datasets" className="mt-10">
           <SectionLabel id="demo-datasets">Demo datasets</SectionLabel>
           <p className="-mt-1 mb-3 text-sm text-muted-foreground">
@@ -98,15 +115,23 @@ function ConnectionRow({
   connection,
   secretMode,
   now,
+  team,
 }: {
   connection: ConnectionSummary;
   secretMode: SecretMode;
   now: Date;
+  team: string | null;
 }) {
+  const signedIn = connection.signIn === "oauth";
   const details = [
     connection.source,
     connection.detail,
     connection.credentialHint,
+    // Whose account a shared sign-in runs as, and who added anything that isn't the reader's own.
+    ...(team && connection.addedBy
+      ? [signedIn ? `signed in by ${connection.addedBy} · everyone queries as them` : `added by ${connection.addedBy}`]
+      : []),
+    ...(team && signedIn && connection.mine && connection.sharing === "org" ? ["everyone queries as you"] : []),
     `checked ${formatRelative(connection.lastCheckedAt, now)}`,
   ];
 
@@ -118,17 +143,23 @@ function ConnectionRow({
           <p className="truncate text-sm font-medium">{connection.name}</p>
           <p className="truncate text-sm text-muted-foreground">{details.join(" · ")}</p>
         </div>
+        {team && <SharingBadge sharing={connection.sharing} />}
         <StatusBadge status={connection.status} />
-        <ConnectionActions
-          connection={{
-            id: connection.id,
-            name: connection.name,
-            type: connection.type,
-            apps: connection.apps,
-            signIn: connection.signIn,
-          }}
-          secretMode={secretMode}
-        />
+        {connection.canManage && (
+          <ConnectionActions
+            connection={{
+              id: connection.id,
+              name: connection.name,
+              type: connection.type,
+              apps: connection.apps,
+              signIn: connection.signIn,
+              sharing: connection.sharing,
+              mine: connection.mine,
+            }}
+            secretMode={secretMode}
+            team={team}
+          />
+        )}
       </div>
       <UsedBy apps={connection.apps} />
     </li>
@@ -161,6 +192,17 @@ const STATUS: Record<ConnectionStatus, { label: string; dot: string }> = {
   invalid: { label: "Invalid", dot: "bg-red-500" },
   unavailable: { label: "Unavailable", dot: "bg-amber-500" },
 };
+
+/** With others in the workspace: whether a connection serves everyone, or only the person who signed in. */
+function SharingBadge({ sharing }: { sharing: ConnectionSummary["sharing"] }) {
+  const Icon = sharing === "org" ? UsersIcon : LockIcon;
+  return (
+    <span className="hidden shrink-0 items-center gap-1 rounded-md bg-neutral-100 px-1.5 py-0.5 text-[0.6875rem] text-neutral-600 sm:flex">
+      <Icon className="size-3" aria-hidden />
+      {sharing === "org" ? "Everyone" : "Only you"}
+    </span>
+  );
+}
 
 function StatusBadge({ status }: { status: ConnectionStatus }) {
   const { label, dot } = STATUS[status];
