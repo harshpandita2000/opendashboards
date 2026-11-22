@@ -46,7 +46,13 @@ export function getGateway(): OpenAI {
 }
 
 /** What one turn did, for the route to act on afterwards. */
-export type TurnContext = ToolContext & { signal: AbortSignal; dashboards: string[] };
+export type TurnContext = ToolContext & {
+  signal: AbortSignal;
+  /** Every dashboard this turn created or changed. */
+  dashboards: string[];
+  /** The ones it created: in a shared app, they're shared when the turn ends. */
+  created: string[];
+};
 
 type AgentTool = RunnableToolFunctionWithContext<TurnContext>;
 
@@ -240,6 +246,7 @@ async function remember(
   if (created) {
     const recorded = await getDashboardService().record(turn.userId, turn.appId, { artifactId: artifact.id, ...created });
     if (!recorded) throw new ToolError("not_found", "This app no longer exists.");
+    turn.created.push(artifact.id);
   }
   track(turn.userId, created ? "dashboard_created" : "dashboard_updated", { app_id: turn.appId, dashboard_id: artifact.id });
   turn.dashboards.push(artifact.id);

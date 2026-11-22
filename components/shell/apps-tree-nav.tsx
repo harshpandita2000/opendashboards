@@ -160,12 +160,14 @@ function Tree({ apps, pathname }: { apps: AppTreeNode[]; pathname: string | null
                       >
                         <span className="truncate">{shown(dashboard.id, dashboard.title)}</span>
                       </Link>
-                      <DashboardMenu
-                        appId={app.id}
-                        dashboard={{ id: dashboard.id, title: shown(dashboard.id, dashboard.title) }}
-                        onRename={() => setEditing(dashboard.id)}
-                        className="absolute top-1.5 right-1.5 opacity-0 group-hover/dashboard:opacity-100 focus-visible:opacity-100"
-                      />
+                      {app.canChange && (
+                        <DashboardMenu
+                          appId={app.id}
+                          dashboard={{ id: dashboard.id, title: shown(dashboard.id, dashboard.title) }}
+                          onRename={() => setEditing(dashboard.id)}
+                          className="absolute top-1.5 right-1.5 opacity-0 group-hover/dashboard:opacity-100 focus-visible:opacity-100"
+                        />
+                      )}
                       </>
                       )}
                     </li>

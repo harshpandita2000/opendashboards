@@ -5,6 +5,7 @@ import { Suspense } from "react";
 
 import { AddAppConnection } from "@/components/apps/add-app-connection";
 import { AppMenu } from "@/components/apps/app-menu";
+import { ShareApp } from "@/components/apps/share-app";
 import { SignInAgainBanner } from "@/components/apps/sign-in-again-banner";
 import { SignInResult } from "@/components/connections/sign-in-result";
 import { AppWorkspace } from "@/components/apps/app-workspace";
@@ -47,8 +48,6 @@ async function AppView({ params, children }: { params: Params; children: React.R
   // The connections of the app's own org, whichever org the user had open.
   const connections = app.canChange ? await getConnectionService().list({ userId: member.userId, orgId: app.orgId }) : [];
   const inApp = new Set(app.connections.map((connection) => connection.id));
-  // Signing in again is for whoever signed in: a teammate's sign-in isn't theirs to renew.
-  const ownSignIns = new Set(connections.filter((connection) => connection.mine).map((connection) => connection.id));
 
   return (
     <>
@@ -76,14 +75,30 @@ async function AppView({ params, children }: { params: Params; children: React.R
           <SignInResult />
           <SignInAgainBanner
             connections={app.connections
-              .filter((connection) => connection.signIn === "oauth" && connection.status === "invalid" && ownSignIns.has(connection.id))
+              // Signing in again is for whoever signed in: a teammate's sign-in isn't theirs to renew.
+              .filter((connection) => connection.signIn === "oauth" && connection.status === "invalid" && connection.mine)
               .map(({ id, name }) => ({ id, name }))}
+            others={app.connections.filter((connection) => connection.needsSignIn).map(({ id, name }) => ({ id, name }))}
           />
         </>
       }
       // Viewing only: no Build panel, no rename, no menu. The server refuses those anyway.
       readOnly={!app.canChange}
-      menu={app.canChange && <AppMenu app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }} />}
+      menu={
+        app.canChange && (
+          <>
+            <ShareApp
+              app={{ id: app.id, name: app.name, teamAccess: app.teamAccess }}
+              workspace={member.orgs.find((org) => org.id === app.orgId)?.name ?? "your workspace"}
+              personalConnections={app.connections.filter((connection) => connection.sharing === "personal").length}
+            />
+            <AppMenu
+              app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }}
+              canDelete={app.access === "owner"}
+            />
+          </>
+        )
+      }
       builder={
         app.canChange && (
           <BuildChat

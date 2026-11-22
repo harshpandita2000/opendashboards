@@ -9,7 +9,7 @@ import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, 
 import { renameAppAction } from "@/app/(app)/apps/actions";
 import { InlineRename } from "@/components/inline-rename";
 import { Button } from "@/components/ui/button";
-import { appPath, dashboardPath, parseAppPath } from "@/lib/apps/paths";
+import { appPath, dashboardPath, frontendTokenPath, parseAppPath } from "@/lib/apps/paths";
 import { cn } from "@/lib/utils";
 
 import { NewDashboard } from "./live-dashboard";
@@ -194,8 +194,8 @@ export function AppWorkspace({
 
   return (
     // One Cloud connection for the workspace: the chat and the dashboard
-    // share its token and artifact cache.
-    <OpenUICloudProvider token="/api/frontend-token">
+    // share its token and artifact cache. The token is this app's own.
+    <OpenUICloudProvider token={frontendTokenPath(appId)}>
     <DashboardResponsesContext value={dashboardResponses}>
     <BuildPanelContext value={buildPanel}>
     <RenameAppContext value={startRename}>

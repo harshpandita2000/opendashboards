@@ -35,6 +35,8 @@ export const createAppSchema = z
   .strict();
 export const renameAppSchema = z.object({ id: appIdSchema, name: appNameSchema }).strict();
 export const appRefSchema = z.object({ id: appIdSchema }).strict();
+/** Who else in the workspace can open an app. */
+export const teamAccessSchema = z.object({ id: appIdSchema, teamAccess: z.enum(["private", "view", "edit"]) }).strict();
 export const addAppConnectionSchema = z.object({ appId: appIdSchema, connectionId: z.uuid() }).strict();
 
 export const registerThreadSchema = z

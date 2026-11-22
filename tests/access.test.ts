@@ -8,7 +8,8 @@ import { createThreadService } from "@/lib/apps/threads";
 import { createConnectionService } from "@/lib/connections/service";
 import { createDashboardService } from "@/lib/dashboards/service";
 import { createDatabase } from "@/lib/db";
-import { apps, dataConnections, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
+import { apps, dataConnections, mcpOAuthSignIns, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
+import { appGroups, cloudIdentity } from "@/lib/dashboards/cloud";
 import { accessFor, appAccess, canChange } from "@/lib/orgs/access";
 import { plaintextSecretBox } from "@/lib/secrets/plaintext";
 import { posthogSource } from "@/lib/sources/posthog/source";
@@ -74,7 +75,7 @@ async function app(userId: string, teamAccess: AppTeamAccess = "private") {
 }
 
 beforeEach(async () => {
-  await db.execute(sql`TRUNCATE ${apps}, ${dataConnections} CASCADE`);
+  await db.execute(sql`TRUNCATE ${apps}, ${dataConnections}, ${mcpOAuthSignIns} CASCADE`);
   await seedWorkspaces(db, ["alice", "ed", "vera", "mallory"]);
   acme = await seedTeam(db, "Acme", { alice: "admin", ed: "editor", vera: "viewer" });
 });
@@ -271,6 +272,102 @@ describe("connections in a team", () => {
     await seedWorkspaces(db, ["ed"]);
     const own = await connections.create(workspaceOf("ed"), KEYED);
     expect(own.ok && (await appsService.addConnection("ed", { appId, connectionId: own.data.id }))).toMatchObject({
+      ok: false,
+      error: { code: "not_found" },
+    });
+  });
+});
+
+describe("sharing an app", () => {
+  it("is for whoever can change it, like a shared document", async () => {
+    const { appId } = await app("ed");
+    expect(await appsService.setTeamAccess("alice", { id: appId, teamAccess: "edit" })).toMatchObject({ ok: false, error: { code: "not_found" } });
+
+    expect(await appsService.setTeamAccess("ed", { id: appId, teamAccess: "view" })).toEqual({ ok: true, data: undefined });
+    expect(await appsService.get("alice", appId)).toMatchObject({ access: "view", teamAccess: "view" });
+    // Viewing isn't enough to re-share.
+    for (const member of ["alice", "vera"]) {
+      expect(await appsService.setTeamAccess(member, { id: appId, teamAccess: "edit" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    }
+
+    await appsService.setTeamAccess("ed", { id: appId, teamAccess: "edit" });
+    // An editor of a shared app can re-share it, a viewer still can't.
+    expect(await appsService.setTeamAccess("vera", { id: appId, teamAccess: "private" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.setTeamAccess("alice", { id: appId, teamAccess: "private" })).toEqual({ ok: true, data: undefined });
+    expect(await appsService.get("alice", appId)).toBeNull();
+    expect(await appsService.get("ed", appId)).toMatchObject({ access: "owner", teamAccess: "private" });
+  });
+
+  it("shows shared apps to the workspace, saying whose they are and what can be changed", async () => {
+    const { appId } = await app("ed", "edit");
+    expect((await appsService.list(inAcme("alice"))).map(({ id, mine, sharedBy }) => ({ id, mine, sharedBy }))).toEqual([
+      { id: appId, mine: false, sharedBy: "ed@example.com" },
+    ]);
+    expect((await appsService.list(inAcme("ed")))[0]).toMatchObject({ mine: true, sharedBy: null });
+    expect((await appsService.tree(inAcme("alice"))).map(({ id, canChange }) => ({ id, canChange }))).toEqual([{ id: appId, canChange: true }]);
+    expect((await appsService.tree(inAcme("vera"))).map(({ id, canChange }) => ({ id, canChange }))).toEqual([{ id: appId, canChange: false }]);
+  });
+
+  it("tells OpenUI Cloud only the one group of the app that the person's access earns", async () => {
+    const { appId } = await app("ed", "edit");
+    const groups = appGroups(appId);
+    expect(groups).toEqual({ view: `app:${appId}:view`, edit: `app:${appId}:edit` });
+    expect(groups.edit.length).toBeLessThanOrEqual(64);
+    const identity = async (userId: string) => cloudIdentity(userId, (await appAccess(db, userId, appId))!);
+    expect(await identity("ed")).toEqual({ userId: "ed", groupIds: [groups.edit] });
+    expect(await identity("alice")).toEqual({ userId: "alice", groupIds: [groups.edit] });
+    expect(await identity("vera")).toEqual({ userId: "vera", groupIds: [groups.view] });
+    expect(await appAccess(db, "mallory", appId)).toBeNull();
+  });
+});
+
+describe("a teammate's personal sign-in in a shared app", () => {
+  /** Ed's app, shared for editing, using Ed's personal Linear sign-in. */
+  async function sharedWithSignIn() {
+    const { appId } = await app("ed", "edit");
+    const eds = await signedIn("ed");
+    expect(await appsService.addConnection("ed", { appId, connectionId: eds })).toEqual({ ok: true, data: undefined });
+    return { appId, eds };
+  }
+
+  it("never runs a teammate's queries as its owner: they're asked to sign in", async () => {
+    const { appId, eds } = await sharedWithSignIn();
+    expect(await connections.open("alice", eds, "mcp", { orgId: acme })).toBeNull();
+    expect(await connections.signInNeeded("alice", eds)).toMatchObject({ orgId: acme, name: "Linear" });
+    expect((await appsService.get("alice", appId))?.connections.find((row) => row.id === eds)).toMatchObject({
+      sharing: "personal",
+      mine: false,
+      needsSignIn: true,
+    });
+    // Its owner needs nothing, and someone outside the workspace learns nothing.
+    expect(await connections.signInNeeded("ed", eds)).toBeNull();
+    expect((await appsService.get("ed", appId))?.connections.find((row) => row.id === eds)).toMatchObject({ mine: true, needsSignIn: false });
+    expect(await connections.signInNeeded("mallory", eds)).toBeNull();
+  });
+
+  it("opens as the teammate's own sign-in to the same server, once they have one", async () => {
+    const { appId, eds } = await sharedWithSignIn();
+    const alices = await signedIn("alice");
+
+    const opened = await connections.open("alice", eds, "mcp", { orgId: acme });
+    expect(opened?.id).toBe(alices);
+    expect(await connections.signInNeeded("alice", eds)).toBeNull();
+    expect((await appsService.get("alice", appId))?.connections.find((row) => row.id === eds)).toMatchObject({ needsSignIn: false });
+    // Still not Vera's.
+    expect(await connections.open("vera", eds, "mcp", { orgId: acme })).toBeNull();
+  });
+
+  it("lets any member, a viewer included, start a sign-in of their own to that server and nothing else", async () => {
+    await sharedWithSignIn();
+    const sign = {
+      connectionId: null,
+      name: "Linear",
+      config: { type: "mcp" as const, url: "https://mcp.linear.app/mcp", headerName: "Authorization" },
+      pending: "{}",
+    };
+    expect(await connections.startSignIn(inAcme("vera"), { ...sign, stateHash: "b".repeat(64) })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await connections.startSignIn(inAcme("vera"), { ...sign, stateHash: "c".repeat(64) }, { ownCopy: true })).toEqual({ ok: true, data: undefined });
+    expect(await connections.startSignIn(inAcme("mallory"), { ...sign, stateHash: "d".repeat(64) }, { ownCopy: true })).toMatchObject({
       ok: false,
       error: { code: "not_found" },
     });

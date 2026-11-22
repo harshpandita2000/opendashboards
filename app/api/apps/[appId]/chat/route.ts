@@ -10,7 +10,8 @@ import { agentTools, getGateway, maxRounds, model, SYSTEM_PROMPT, type TurnConte
 import { createAgUiTranslator, sse } from "@/lib/agent/ag-ui";
 import { answerStoppedCalls, chatBodySchema, VIEWING_DASHBOARD, type ChatBody } from "@/lib/agent/messages";
 import { getAppService, getThreadService } from "@/lib/apps";
-import { getDashboardService } from "@/lib/dashboards";
+import { getDashboardService, shareDashboardsWithApp } from "@/lib/dashboards";
+import { appGroups } from "@/lib/dashboards/cloud";
 import { HttpError, readJson, route } from "@/lib/http";
 import { addLogContext, logError } from "@/lib/log";
 import { count } from "@/lib/metrics";
@@ -64,7 +65,27 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
   }
 
   const encoder = new TextEncoder();
-  const turn: TurnContext = { userId: user.id, appId, orgId: app.orgId, signal: request.signal, dashboards: [] };
+  // Whoever builds here can change the app, so Cloud is told they hold its edit group.
+  const turn: TurnContext = {
+    userId: user.id,
+    groupIds: [appGroups(appId).edit],
+    appId,
+    orgId: app.orgId,
+    signal: request.signal,
+    dashboards: [],
+    created: [],
+  };
+
+  /**
+   * A dashboard follows its app: one created in an app shared with the
+   * workspace is shared too, once the turn that made it is over. (OpenUI Cloud
+   * names a dashboard before it has finished building it, and can't share it
+   * until then.) If that fails, saving the app's Share dialog shares it again.
+   */
+  const shareCreated = async () => {
+    if (!turn.created.length || app.teamAccess === "private") return;
+    if (!(await shareDashboardsWithApp(appId, turn.created))) logError("chat.shareCreated", new Error("New dashboards weren't shared with the app's groups"));
+  };
 
   const startedAt = Date.now();
   const trackTurn = (outcome: string, cause: string, turnMessages: ChatCompletionMessageParam[]) => {
@@ -132,7 +153,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
             writing?.content || writing?.tool_calls?.length
               ? [{ role: "assistant", content: writing.content ?? null, tool_calls: writing.tool_calls }]
               : [];
-          waitUntil(save(answerStoppedCalls([...newMessages(), ...partial])));
+          waitUntil(Promise.all([save(answerStoppedCalls([...newMessages(), ...partial])), shareCreated()]));
           controller.close();
           return;
         }
@@ -142,6 +163,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
         trackTurn("failed", failure.cause, newMessages());
         translate.finish();
         emit({ type: EventType.RUN_ERROR, message: failure.message } as BaseEvent);
+        await shareCreated();
         controller.close();
         return; // Failed: save nothing.
       }
@@ -150,6 +172,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
       const turnMessages = newMessages();
       trackTurn("completed", "none", turnMessages);
       await save(turnMessages);
+      await shareCreated();
       controller.close();
     },
   });

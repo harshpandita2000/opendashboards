@@ -6,15 +6,17 @@ import {
   apps,
   dashboards,
   dataConnections,
+  users,
   type AppTeamAccess,
+  type ConnectionSharing,
   type ConnectionStatus,
 } from "@/lib/db/schema";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import { logError } from "@/lib/log";
-import { appAccess, canBuild, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
+import { accessFor, appAccess, canBuild, canChange, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
 
 import { fail, forbidden, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
-import { addAppConnectionSchema, appIdSchema, appRefSchema, createAppSchema, renameAppSchema } from "./schemas";
+import { addAppConnectionSchema, appIdSchema, appRefSchema, createAppSchema, renameAppSchema, teamAccessSchema } from "./schemas";
 
 export type AppConnectionBadge = { id: string; name: string };
 
@@ -24,11 +26,19 @@ export type AppSummary = {
   updatedAt: Date;
   dashboardCount: number;
   connections: AppConnectionBadge[];
-  /** Whether the caller owns it; otherwise it was shared with their team. */
+  /** Whether the caller owns it; otherwise it was shared with their workspace. */
   mine: boolean;
+  /** Its owner's email, when that isn't the caller. */
+  sharedBy: string | null;
 };
 
-export type AppTreeNode = { id: string; name: string; dashboards: { id: string; title: string }[] };
+export type AppTreeNode = {
+  id: string;
+  name: string;
+  /** Whether the caller may rename or delete its dashboards. False when they can only view it. */
+  canChange: boolean;
+  dashboards: { id: string; title: string }[];
+};
 
 export type AppDetail = {
   id: string;
@@ -46,7 +56,19 @@ export type AppDetail = {
   createdAt: Date;
   updatedAt: Date;
   dashboards: { id: string; title: string; description: string | null; artifactId: string; position: number }[];
-  connections: (AppConnectionBadge & { type: ConnectionType; status: ConnectionStatus; signIn: "oauth" | null })[];
+  connections: (AppConnectionBadge & {
+    type: ConnectionType;
+    status: ConnectionStatus;
+    signIn: "oauth" | null;
+    sharing: ConnectionSharing;
+    /** Whether the caller added it (for a sign-in: whether it's theirs). */
+    mine: boolean;
+    /**
+     * Someone else's personal sign-in, and the caller has none of their own
+     * to that server: its dashboards stay empty for them until they sign in.
+     */
+    needsSignIn: boolean;
+  })[];
 };
 
 /**
@@ -82,6 +104,8 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         type: dataConnections.type,
         status: dataConnections.status,
         config: dataConnections.config,
+        sharing: dataConnections.sharing,
+        ownerId: dataConnections.userId,
       })
       .from(appConnections)
       .innerJoin(dataConnections, eq(dataConnections.id, appConnections.connectionId))
@@ -99,19 +123,22 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
           name: apps.name,
           updatedAt: apps.updatedAt,
           ownerId: apps.userId,
+          ownerEmail: users.email,
           dashboardCount: count(dashboards.id),
         })
         .from(apps)
         .leftJoin(dashboards, eq(dashboards.appId, apps.id))
+        .leftJoin(users, eq(users.id, apps.userId))
         .where(visibleTo(scope))
-        .groupBy(apps.id)
+        .groupBy(apps.id, users.email)
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       const rows = limit ? await query.limit(limit) : await query;
 
       const badges = await connectionBadges(rows.map((row) => row.id));
-      return rows.map(({ ownerId, ...row }) => ({
+      return rows.map(({ ownerId, ownerEmail, ...row }) => ({
         ...row,
         mine: ownerId === scope.userId,
+        sharedBy: ownerId === scope.userId ? null : ownerEmail,
         connections: badges
           .filter((badge) => badge.appId === row.id)
           .map(({ id, name }) => ({ id, name })),
@@ -120,9 +147,10 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 
     /** Apps with their dashboards' titles, for the sidebar tree. Newest app first. */
     async tree(scope: Scope): Promise<AppTreeNode[]> {
-      if (!(await roleIn(db, scope.userId, scope.orgId))) return [];
+      const role = await roleIn(db, scope.userId, scope.orgId);
+      if (!role) return [];
       const appRows = await db
-        .select({ id: apps.id, name: apps.name })
+        .select({ id: apps.id, name: apps.name, userId: apps.userId, teamAccess: apps.teamAccess })
         .from(apps)
         .where(visibleTo(scope))
         .orderBy(desc(apps.updatedAt), desc(apps.id));
@@ -139,8 +167,9 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         )
         .orderBy(asc(dashboards.position), asc(dashboards.createdAt));
 
-      return appRows.map((app) => ({
+      return appRows.map(({ userId: ownerId, teamAccess, ...app }) => ({
         ...app,
+        canChange: canChange(accessFor({ userId: ownerId, teamAccess }, scope.userId, role) ?? "view", role),
         dashboards: dashboardRows
           .filter((dashboard) => dashboard.appId === app.id)
           .map(({ id, title }) => ({ id, title })),
@@ -187,6 +216,15 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         : [];
 
       const badges = await connectionBadges([app.id]);
+      // The servers the caller has signed in to themselves: a teammate's sign-in to the same server is covered by theirs.
+      const others = badges.filter((badge) => badge.sharing === "personal" && badge.ownerId !== userId);
+      const ownSignIns = others.length
+        ? await db
+            .select({ config: dataConnections.config })
+            .from(dataConnections)
+            .where(and(eq(dataConnections.orgId, grant.orgId), eq(dataConnections.userId, userId), eq(dataConnections.sharing, "personal")))
+        : [];
+      const signedInTo = new Set(ownSignIns.map((row) => serverOf(row.config)));
       const { pendingConnectionIds: _ids, ...rest } = app;
       return {
         ...rest,
@@ -195,11 +233,14 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         canChange: grant.canChange,
         pendingConnections,
         dashboards: appDashboards,
-        connections: badges.map(({ id, name, type, status, config }) => ({
+        connections: badges.map(({ id, name, type, status, config, sharing, ownerId }) => ({
           id,
           name,
           type,
           status,
+          sharing,
+          mine: ownerId === userId,
+          needsSignIn: sharing === "personal" && ownerId !== userId && !signedInTo.has(serverOf(config)),
           // Signed in with OAuth: when it's invalid, the fix is signing in again.
           signIn: config && typeof config === "object" && "oauth" in config && config.oauth ? ("oauth" as const) : null,
         })),
@@ -267,6 +308,23 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
           .where(eq(apps.id, parsed.data.id))
           .returning({ id: apps.id });
         return updated.length ? ok(undefined) : notFound();
+      });
+    },
+
+    /**
+     * Sets who else in the workspace can open the app: nobody, everyone to
+     * view, or everyone to edit. For anyone who can change it, as with a
+     * shared document. Its dashboards follow: nothing is shared one by one.
+     */
+    setTeamAccess(userId: string, input: unknown): Promise<AppResult> {
+      return guard("setTeamAccess", async () => {
+        const parsed = teamAccessSchema.safeParse(input);
+        if (!parsed.success) return notFound();
+        const grant = await appAccess(db, userId, parsed.data.id);
+        if (!grant) return notFound();
+        if (!grant.canChange) return forbidden();
+        await db.update(apps).set({ teamAccess: parsed.data.teamAccess, updatedAt: now() }).where(eq(apps.id, parsed.data.id));
+        return ok(undefined);
       });
     },
 
@@ -351,6 +409,12 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 }
 
 export type AppService = ReturnType<typeof createAppService>;
+
+/** Which server a stored connection points at: for telling two sign-ins to the same place apart from two different ones. */
+export function serverOf(config: unknown): string | null {
+  const url = config && typeof config === "object" && "url" in config ? (config as { url?: unknown }).url : null;
+  return typeof url === "string" ? url : null;
+}
 
 /**
  * A new app's name: its data sources and a number, "Retail sales: App 2",

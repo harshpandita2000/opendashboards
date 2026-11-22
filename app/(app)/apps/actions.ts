@@ -11,7 +11,7 @@ import { requireUser } from "@/lib/auth/user";
 import { getAppService } from "@/lib/apps";
 import { getConnectionService } from "@/lib/connections";
 import { fail, type AppResult } from "@/lib/apps/errors";
-import { deleteAppDashboardsInCloud, deleteDashboard, getDashboardService } from "@/lib/dashboards";
+import { deleteAppDashboardsInCloud, deleteDashboard, getDashboardService, shareDashboardsWithApp } from "@/lib/dashboards";
 import { getAppGrant, requireMember } from "@/lib/orgs";
 
 /*
@@ -54,6 +54,35 @@ export async function renameAppAction(input: unknown): Promise<AppResult> {
   const user = await requireUser();
   const result = await getAppService().rename(user.id, input);
   if (result.ok) revalidateShell();
+  return result;
+}
+
+const teamAccessInput = z.object({ id: z.uuid(), teamAccess: z.enum(["private", "view", "edit"]) }).strict();
+
+/**
+ * Sets who else in the workspace can open an app. Before it's opened up, its
+ * dashboards are shared with the app's groups in OpenUI Cloud (again if they
+ * already were, which changes nothing), so everyone let in can load them.
+ */
+export async function setAppTeamAccessAction(input: unknown): Promise<AppResult> {
+  const user = await requireUser();
+  const parsed = teamAccessInput.safeParse(input);
+  if (!parsed.success) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  const { id, teamAccess } = parsed.data;
+  const app = await getAppService().get(user.id, id);
+  if (!app) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  if (!app.canChange) return fail({ code: "forbidden", message: "You can view this app, but you can't change who it's shared with." });
+  if (teamAccess !== "private") {
+    const shared = await shareDashboardsWithApp(id, app.dashboards.map((dashboard) => dashboard.artifactId));
+    if (!shared) {
+      return fail({ code: "internal", message: "OpenUI Cloud couldn't share the app's dashboards. Nothing changed. Try again." });
+    }
+  }
+  const result = await getAppService().setTeamAccess(user.id, parsed.data);
+  if (result.ok) {
+    track(user.id, "app_sharing_changed", { app_id: id, team_access: teamAccess });
+    revalidateShell();
+  }
   return result;
 }
 

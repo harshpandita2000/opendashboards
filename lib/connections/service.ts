@@ -198,20 +198,56 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
   const usableBy = ({ userId, orgId }: Scope) =>
     and(eq(dataConnections.orgId, orgId), or(eq(dataConnections.sharing, "org"), eq(dataConnections.userId, userId)));
 
+  /** A connection and the caller's role in its org, or null: no such connection, or they aren't a member. */
+  async function lookup(userId: string, id: string) {
+    if (!isUuid(id)) return null;
+    const [row] = await db.select().from(dataConnections).where(eq(dataConnections.id, id)).limit(1);
+    if (!row) return null;
+    const role = await roleIn(db, userId, row.orgId);
+    return role ? { row, role, own: row.userId === userId } : null;
+  }
+
   /**
    * A connection and what the caller may do with it, or null when they can't
    * even use it. `manage`: rename, re-key, test, delete, share. `own`: they
    * added it, which is what signing in again needs.
    */
   async function find(userId: string, id: string) {
-    if (!isUuid(id)) return null;
-    const [row] = await db.select().from(dataConnections).where(eq(dataConnections.id, id)).limit(1);
-    if (!row) return null;
-    const role = await roleIn(db, userId, row.orgId);
-    if (!role) return null;
-    const own = row.userId === userId;
-    if (row.sharing === "personal" && !own) return null;
-    return { row, role, own, manage: canManageConnections(role) && (own || row.sharing === "org") };
+    const found = await lookup(userId, id);
+    if (!found) return null;
+    if (found.row.sharing === "personal" && !found.own) return null;
+    return { ...found, manage: canManageConnections(found.role) && (found.own || found.row.sharing === "org") };
+  }
+
+  /** Which server a stored connection points at, for matching two sign-ins to the same place. */
+  const serverOf = (row: { config: unknown }) => {
+    const url = (row.config as { url?: unknown } | null)?.url;
+    return typeof url === "string" ? url : null;
+  };
+
+  /**
+   * A teammate's personal sign-in the caller can't use, if `id` is one: the
+   * caller's queries never run as someone else, so it's theirs to answer with
+   * a sign-in of their own to the same server. With `own`, the one they have.
+   */
+  async function someoneElsesSignIn(userId: string, id: string) {
+    const found = await lookup(userId, id);
+    if (!found || found.own || found.row.sharing !== "personal" || !found.row.orgId) return null;
+    const server = serverOf(found.row);
+    if (!server) return null;
+    const mine = await db
+      .select()
+      .from(dataConnections)
+      .where(
+        and(
+          eq(dataConnections.orgId, found.row.orgId),
+          eq(dataConnections.userId, userId),
+          eq(dataConnections.type, found.row.type),
+          eq(dataConnections.sharing, "personal"),
+        ),
+      )
+      .orderBy(asc(dataConnections.createdAt));
+    return { theirs: found.row, own: mine.find((row) => serverOf(row) === server) ?? null };
   }
 
   /** A connection the caller may manage, as a result: missing and "use only" stay distinct. */
@@ -664,7 +700,9 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * A connection opened for a tool: its settings and decrypted credential,
      * only if the caller can query it and it is of `type`. With `orgId`, only
      * if it belongs to that org too: an app only ever queries its own org's
-     * connections. Server code only; the credential never leaves the server.
+     * connections. A teammate's personal sign-in opens as the caller's own
+     * sign-in to the same server (the returned `id` is then theirs), never as
+     * the teammate. Server code only; the credential never leaves the server.
      */
     async open(
       userId: string,
@@ -672,9 +710,9 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
       type: ConnectionType,
       { orgId }: { orgId?: string } = {},
     ): Promise<OpenConnection<Record<string, unknown>> | null> {
-      const found = await find(userId, connectionId);
-      if (!found || found.row.type !== type) return null;
-      const { row } = found;
+      // Someone else's personal sign-in opens as the caller's own sign-in to the same server, or not at all.
+      const row = (await find(userId, connectionId))?.row ?? (await someoneElsesSignIn(userId, connectionId))?.own;
+      if (!row || row.type !== type) return null;
       if (orgId !== undefined && row.orgId !== orgId) return null;
       if (row.demoDataset !== null) {
         // Where it points and the shared read-only password come from config, never the row.
@@ -696,6 +734,17 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     },
 
     /**
+     * For a connection that didn't open: the teammate's personal sign-in it
+     * is, when the reason is that the caller has no sign-in of their own to
+     * that server. Its name and where it points, so they can be asked to sign in.
+     */
+    async signInNeeded(userId: string, connectionId: string): Promise<{ orgId: string; name: string; config: ConnectionConfig } | null> {
+      const other = await someoneElsesSignIn(userId, connectionId);
+      if (!other || other.own || !other.theirs.orgId || other.theirs.demoDataset !== null) return null;
+      return { orgId: other.theirs.orgId, name: other.theirs.name, config: configOf(other.theirs) };
+    },
+
+    /**
      * Keeps a started OAuth sign-in until the browser comes back: the user it
      * belongs to, the connection it will become, and (sealed) the PKCE verifier
      * and client registration. Found later by the state's hash only.
@@ -703,6 +752,8 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     startSignIn(
       scope: Scope,
       sign: { stateHash: string; connectionId: string | null; name: string; config: ConnectionConfig; pending: string },
+      /** Signing in to a server a teammate's personal connection points at: any member may, to see its data as themselves. */
+      { ownCopy = false }: { ownCopy?: boolean } = {},
     ): Promise<Result<undefined>> {
       return guard("startSignIn", async () => {
         const { userId, orgId } = scope;
@@ -714,7 +765,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         } else {
           const role = await roleIn(db, userId, orgId);
           if (!role) return notFound();
-          if (!canManageConnections(role)) return forbidden();
+          if (!ownCopy && !canManageConnections(role)) return forbidden();
         }
         const tooLarge = refuseIfTooLarge(sign.config.type, sign.pending, "create");
         if (tooLarge) return tooLarge;
@@ -786,10 +837,10 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
           }
         }
 
-        // A new sign-in is its owner's alone until they choose to share it.
+        // A new sign-in is its owner's alone until they choose to share it. Starting it was what needed
+        // permission; this only finishes one this user started, in a workspace they're still in.
         const role = await roleIn(db, userId, input.orgId);
         if (!role || !input.orgId) return notFound();
-        if (!canManageConnections(role)) return forbidden();
         const id = randomUUID();
         try {
           const secret = await sealCredential(input.credential, context(config.type, userId, id));

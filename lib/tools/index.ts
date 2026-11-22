@@ -29,6 +29,8 @@ export type ToolContext = {
   appId: string;
   /** The app's org: its tools reach only that org's connections. */
   orgId: string;
+  /** The app group the user's access earns them, for OpenUI Cloud (lib/dashboards/cloud). */
+  groupIds?: string[];
   /** Called when a call finds a sign-in expired or revoked (its connection is now marked so). */
   onSignInLost?: () => void;
 };
@@ -78,7 +80,12 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
       const { connection: connectionId, ...toolArgs } = parsed.data;
 
       const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType, { orgId: context.orgId });
-      if (!connection) throw new ToolError("connection_not_found", `No ${source.label} connection with id ${connectionId}.`);
+      if (!connection) {
+        // A teammate's personal sign-in: this person's queries run as themselves, so they sign in too.
+        const theirs = await getConnectionService().signInNeeded(context.userId, connectionId);
+        if (theirs) throw new ToolError("sign_in_required", `Sign in to ${theirs.name} to see this. It uses a personal sign-in.`);
+        throw new ToolError("connection_not_found", `No ${source.label} connection with id ${connectionId}.`);
+      }
 
       // Tool calls in one turn run concurrently, so each gets its own copy of the context.
       const result = await withLogContext({ connection: connection.id }, async () => {
@@ -97,9 +104,12 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
         }
       });
 
-      // Inferred from use. A failure to record shouldn't fail the query.
-      const recorded = await getAppService().recordConnectionUse(context.userId, context.appId, connection.id);
-      if (!recorded.ok && recorded.error.code !== "not_found") logError("tools.recordConnectionUse", recorded.error);
+      // Inferred from use. A failure to record shouldn't fail the query. Not when a teammate's sign-in
+      // opened as this person's own: the app already lists the connection its dashboards name.
+      if (connection.id === connectionId) {
+        const recorded = await getAppService().recordConnectionUse(context.userId, context.appId, connection.id);
+        if (!recorded.ok && recorded.error.code !== "not_found") logError("tools.recordConnectionUse", recorded.error);
+      }
       return result;
     },
   };

@@ -21,8 +21,8 @@ async function AppHome({ params }: { params: Promise<{ appId: string }> }) {
 
   const first = app.dashboards[0];
   return first ? (
-    <LiveDashboard key={first.id} appId={app.id} dashboard={first} />
+    <LiveDashboard key={first.id} appId={app.id} dashboard={first} readOnly={!app.canChange} />
   ) : (
-    <NoDashboards hasPendingPrompt={Boolean(app.pendingPrompt)} />
+    <NoDashboards hasPendingPrompt={Boolean(app.pendingPrompt)} readOnly={!app.canChange} />
   );
 }

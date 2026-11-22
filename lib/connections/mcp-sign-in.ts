@@ -46,6 +46,8 @@ const startSchema = z.union([
   // A known server: its endpoint comes from the preset, never the browser.
   z.object({ name: connectionNameSchema, service: z.enum(MCP_SERVICE_KEYS) }).strict(),
   z.object({ connectionId: z.uuid(), returnTo: z.string().regex(RETURN_PATH).optional() }).strict(),
+  // A sign-in of the caller's own to the server a teammate's personal connection points at.
+  z.object({ like: z.uuid(), returnTo: z.string().regex(RETURN_PATH).optional() }).strict(),
 ]);
 
 /** What a pending sign-in keeps sealed, besides the settings it will save. */
@@ -54,8 +56,9 @@ type PendingSecret = PendingSignIn & { requireIss: boolean; returnTo?: string };
 type Deps = { service?: ConnectionService; testHooks?: OAuthTestHooks; redirectUri?: string };
 
 /**
- * Starts a sign-in for a new server in the member's org, or again for an
- * existing connection of theirs. Returns where to send the browser.
+ * Starts a sign-in for a new server in the member's org, again for an
+ * existing connection of theirs, or of their own to the server a teammate's
+ * personal connection points at. Returns where to send the browser.
  */
 export async function startMcpSignIn(scope: Scope, input: unknown, deps: Deps = {}): Promise<Result<{ authorizationUrl: string }>> {
   const { userId } = scope;
@@ -68,7 +71,18 @@ export async function startMcpSignIn(scope: Scope, input: unknown, deps: Deps = 
   let connectionId: string | null = null;
   let returnTo: string | undefined;
   let preset: McpServiceKey | undefined;
-  if ("connectionId" in parsed.data) {
+  let ownCopy = false;
+  let orgId = scope.orgId;
+  if ("like" in parsed.data) {
+    ({ returnTo } = parsed.data);
+    const theirs = await service.signInNeeded(userId, parsed.data.like);
+    if (!theirs || theirs.config.type !== "mcp") return notFound();
+    ({ name } = theirs);
+    ({ url, service: preset } = theirs.config as { url: string; service?: McpServiceKey });
+    // In the workspace that connection is in, whichever one the caller has open.
+    ({ orgId } = theirs);
+    ownCopy = true;
+  } else if ("connectionId" in parsed.data) {
     ({ returnTo } = parsed.data);
     const existing = await service.open(userId, parsed.data.connectionId, "mcp");
     if (!existing) return notFound();
@@ -96,13 +110,17 @@ export async function startMcpSignIn(scope: Scope, input: unknown, deps: Deps = 
       requireIss: (discovery.metadata as { authorization_response_iss_parameter_supported?: boolean }).authorization_response_iss_parameter_supported === true,
       returnTo,
     };
-    const saved = await service.startSignIn(scope, {
-      stateHash: started.stateHash,
-      connectionId,
-      name,
-      config: { type: "mcp", url, headerName: "Authorization", ...(preset && { service: preset }), oauth: discovery.settings },
-      pending: JSON.stringify(pending),
-    });
+    const saved = await service.startSignIn(
+      { userId, orgId },
+      {
+        stateHash: started.stateHash,
+        connectionId,
+        name,
+        config: { type: "mcp", url, headerName: "Authorization", ...(preset && { service: preset }), oauth: discovery.settings },
+        pending: JSON.stringify(pending),
+      },
+      { ownCopy },
+    );
     if (!saved.ok) return saved;
     return ok({ authorizationUrl: started.authorizationUrl.href });
   } catch (error) {
