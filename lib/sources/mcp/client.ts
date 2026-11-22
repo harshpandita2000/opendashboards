@@ -72,24 +72,59 @@ export async function withMcpClient<T>(
 
 export type McpToolInfo = { name: string; title: string | null; description: string | null; inputSchema: unknown };
 
-async function listTools(client: Client, signal: AbortSignal): Promise<McpToolInfo[]> {
+/**
+ * OpenDashboards only reads. A tool its server marks as not read-only
+ * (`readOnlyHint: false`) is never offered or called. A tool without the
+ * annotation is allowed: most servers don't annotate their tools.
+ */
+type ToolAnnotations = { readOnlyHint?: unknown } | undefined;
+export const changesData = (annotations: ToolAnnotations) => annotations?.readOnlyHint === false;
+
+/** Every tool the server lists, as is, up to the configured cap. */
+async function allTools(client: Client, signal: AbortSignal) {
   const settings = appConfig().mcp;
-  const tools: McpToolInfo[] = [];
+  const tools: Awaited<ReturnType<Client["listTools"]>>["tools"] = [];
   let cursor: string | undefined;
   do {
     const page = await client.listTools(cursor ? { cursor } : undefined, { signal, timeout: settings.requestTimeoutMs });
     for (const tool of page.tools) {
       if (tools.length >= settings.maxTools) return tools;
-      tools.push({
-        name: tool.name,
-        title: tool.title ?? tool.annotations?.title ?? null,
-        description: tool.description?.slice(0, 2_000) ?? null,
-        inputSchema: tool.inputSchema,
-      });
+      tools.push(tool);
     }
     cursor = page.nextCursor;
   } while (cursor);
   return tools;
+}
+
+/** Pages checked when looking for one tool by name: far past what any real server lists. */
+const MAX_TOOL_PAGES = 50;
+
+/** The named tool as the server lists it, looking past the listing cap; null when it isn't listed. */
+async function findTool(client: Client, signal: AbortSignal, name: string) {
+  const timeout = appConfig().mcp.requestTimeoutMs;
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_TOOL_PAGES; page++) {
+    const result = await client.listTools(cursor ? { cursor } : undefined, { signal, timeout });
+    const tool = result.tools.find((candidate) => candidate.name === name);
+    if (tool) return tool;
+    cursor = result.nextCursor;
+    if (!cursor) return null;
+  }
+  return null;
+}
+
+async function listTools(client: Client, signal: AbortSignal): Promise<McpToolInfo[]> {
+  const tools = await allTools(client, signal);
+  const readable = tools.filter((tool) => !changesData(tool.annotations));
+  if (tools.length > 0 && readable.length === 0) {
+    throw new McpError("tool_not_allowed", "Every tool this server offers changes data, and OpenDashboards only reads.");
+  }
+  return readable.map((tool) => ({
+    name: tool.name,
+    title: tool.title ?? tool.annotations?.title ?? null,
+    description: tool.description?.slice(0, 2_000) ?? null,
+    inputSchema: tool.inputSchema,
+  }));
 }
 
 /** The server's tools, with their descriptions and input schemas. */
@@ -150,6 +185,12 @@ export function callMcpTool(
   return withMcpClient(
     target,
     async (client, signal) => {
+      // Checked on every call, in the same session: only a tool the server lists, and never one it says changes data.
+      const tool = await findTool(client, signal, name);
+      if (!tool) throw new McpError("bad_arguments", `The server doesn't list a tool called ${name}`);
+      if (changesData(tool.annotations)) {
+        throw new McpError("tool_not_allowed", `${name} changes data, and OpenDashboards only reads.`);
+      }
       const result = await client.callTool({ name, arguments: args }, undefined, {
         signal,
         timeout: appConfig().mcp.requestTimeoutMs,
