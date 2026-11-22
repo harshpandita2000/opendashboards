@@ -99,6 +99,7 @@ async function AppView({ params, children }: { params: Params; children: React.R
               workspace={member.orgs.find((org) => org.id === app.orgId)?.name ?? "your workspace"}
               personalConnections={app.connections.filter((connection) => connection.sharing === "personal").length}
               guests={guests.map(({ email }) => email)}
+              dashboardCount={app.dashboards.length}
             />
             <AppMenu
               app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }}

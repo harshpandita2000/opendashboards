@@ -1,7 +1,7 @@
 "use client";
 
 import { CheckIcon, EyeIcon, LinkIcon, Loader2Icon, LockIcon, PencilIcon, UsersIcon, XIcon } from "lucide-react";
-import { useState, useTransition } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, useTransition } from "react";
 import { toast } from "sonner";
 
 import { addAppGuestAction, removeAppGuestAction, setAppTeamAccessAction } from "@/app/(app)/apps/actions";
@@ -34,6 +34,7 @@ export function ShareApp({
   workspace,
   personalConnections,
   guests,
+  dashboardCount,
 }: {
   app: App;
   /** The workspace's name. */
@@ -42,11 +43,27 @@ export function ShareApp({
   personalConnections: number;
   /** People outside the workspace who may view the app, by email. */
   guests: string[];
+  /** How many dashboards the app has: its first one is the moment to suggest sharing. */
+  dashboardCount: number;
 }) {
   const [open, setOpen] = useState(false);
+  const nudge = useShareNudge(app.id, dashboardCount);
+  // Nothing to suggest once it's shared.
+  const showNudge = nudge.pending && !open && app.teamAccess === "private" && !guests.length;
   const [choice, setChoice] = useState<AppTeamAccess>(app.teamAccess);
   const [error, setError] = useState<string | null>(null);
   const [pending, startTransition] = useTransition();
+
+  function openDialog(next: boolean) {
+    if (pending) return;
+    if (next) {
+      setChoice(app.teamAccess);
+      setError(null);
+      // Opening Share answers the suggestion.
+      nudge.dismiss();
+    }
+    setOpen(next);
+  }
 
   function save() {
     startTransition(async () => {
@@ -62,21 +79,31 @@ export function ShareApp({
 
   return (
     <>
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)}>
-        {app.teamAccess === "private" && !guests.length ? <LockIcon aria-hidden /> : <UsersIcon aria-hidden />}
-        Share
-      </Button>
-      <Dialog
-        open={open}
-        onOpenChange={(next) => {
-          if (pending) return;
-          if (next) {
-            setChoice(app.teamAccess);
-            setError(null);
-          }
-          setOpen(next);
-        }}
-      >
+      <div className="relative">
+        <Button variant="outline" size="sm" onClick={() => openDialog(true)}>
+          {app.teamAccess === "private" && !guests.length ? <LockIcon aria-hidden /> : <UsersIcon aria-hidden />}
+          Share
+        </Button>
+        {showNudge && (
+          <div
+            role="status"
+            className="absolute top-full right-0 z-30 mt-2 w-64 rounded-lg border bg-popover p-3 text-popover-foreground shadow-lg"
+          >
+            {/* Points at the Share button above. */}
+            <span aria-hidden className="absolute -top-1.5 right-6 size-3 rotate-45 border-t border-l bg-popover" />
+            <div className="flex items-start gap-2">
+              <p className="min-w-0 flex-1 text-sm">Your dashboard is ready. Share it with your team or a client.</p>
+              <Button variant="ghost" size="icon-sm" aria-label="Dismiss" onClick={nudge.dismiss} className="-mt-1 -mr-1">
+                <XIcon aria-hidden />
+              </Button>
+            </div>
+            <Button size="sm" className="mt-2" onClick={() => openDialog(true)}>
+              Share
+            </Button>
+          </div>
+        )}
+      </div>
+      <Dialog open={open} onOpenChange={openDialog}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle>Share {app.name}</DialogTitle>
@@ -139,6 +166,52 @@ export function ShareApp({
       </Dialog>
     </>
   );
+}
+
+/*
+ * The suggestion to share, made when an app gets its first dashboard. It's
+ * kept in this browser: "pending" from that moment until it's dismissed or
+ * Share is opened, so it survives a reload and never comes back for that app.
+ */
+const nudgeKey = (appId: string) => `opendashboards:share-nudge:${appId}`;
+const nudgeListeners = new Set<() => void>();
+
+function readNudge(appId: string) {
+  try {
+    return window.localStorage.getItem(nudgeKey(appId));
+  } catch {
+    return null;
+  }
+}
+
+function writeNudge(appId: string, value: "pending" | "done") {
+  try {
+    window.localStorage.setItem(nudgeKey(appId), value);
+  } catch {
+    // Without storage the suggestion just doesn't show.
+  }
+  nudgeListeners.forEach((listener) => listener());
+}
+
+function subscribeNudge(listener: () => void) {
+  nudgeListeners.add(listener);
+  return () => void nudgeListeners.delete(listener);
+}
+
+function useShareNudge(appId: string, dashboardCount: number) {
+  const state = useSyncExternalStore(
+    subscribeNudge,
+    () => readNudge(appId),
+    () => null,
+  );
+  // The first dashboard arriving while the app is open is the moment.
+  const before = useRef(dashboardCount);
+  useEffect(() => {
+    if (before.current === 0 && dashboardCount > 0 && readNudge(appId) === null) writeNudge(appId, "pending");
+    before.current = dashboardCount;
+  }, [appId, dashboardCount]);
+
+  return { pending: state === "pending", dismiss: () => state === "pending" && writeNudge(appId, "done") };
 }
 
 /**
