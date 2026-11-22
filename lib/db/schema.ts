@@ -202,6 +202,25 @@ export const appConnections = pgTable(
   ],
 );
 
+/**
+ * People outside the workspace who may view an app, by email. A guest gets
+ * the whole app, read-only: every dashboard in it, never one on its own, and
+ * nothing else of the workspace. Matched to whoever signs in with that email.
+ */
+export const appGuests = pgTable(
+  "app_guests",
+  {
+    appId: uuid("app_id")
+      .notNull()
+      .references(() => apps.id, { onDelete: "cascade" }),
+    /** Lowercased. */
+    email: text("email").notNull(),
+    invitedBy: text("invited_by").notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.email] }), index("app_guests_email_idx").on(table.email)],
+);
+
 /** A dashboard in an app. Its content and versions live in OpenUI Cloud. */
 export const dashboards = pgTable(
   "dashboards",

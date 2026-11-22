@@ -11,7 +11,7 @@ import { SignInResult } from "@/components/connections/sign-in-result";
 import { AppWorkspace } from "@/components/apps/app-workspace";
 import { BuildChat } from "@/components/apps/build-chat";
 import { Skeleton } from "@/components/ui/skeleton";
-import { getCurrentUserApp, type AppDetail } from "@/lib/apps";
+import { getAppService, getCurrentUserApp, type AppDetail } from "@/lib/apps";
 import { OpenAppOrg } from "@/components/shell/open-app-org";
 import { requireMember } from "@/lib/orgs";
 import { getConnectionService } from "@/lib/connections";
@@ -48,10 +48,12 @@ async function AppView({ params, children }: { params: Params; children: React.R
   // The connections of the app's own org, whichever org the user had open.
   const connections = app.canChange ? await getConnectionService().list({ userId: member.userId, orgId: app.orgId }) : [];
   const inApp = new Set(app.connections.map((connection) => connection.id));
+  const guests = app.canChange ? await getAppService().guests(member.userId, app.id) : [];
 
   return (
     <>
-    {member.orgId !== app.orgId && <OpenAppOrg orgId={app.orgId} />}
+    {/* A guest isn't in the app's workspace, so there's nothing of theirs to open there. */}
+    {!app.guest && member.orgId !== app.orgId && <OpenAppOrg orgId={app.orgId} />}
     <AppWorkspace
       // A fresh workspace per app, so the Build panel's open/closed default applies to each.
       key={app.id}
@@ -59,7 +61,8 @@ async function AppView({ params, children }: { params: Params; children: React.R
       name={app.name}
       badges={
         <>
-          <ConnectionBadges app={app} />
+          {/* A guest sees the app, not what the workspace is connected to. */}
+          {!app.guest && <ConnectionBadges app={app} />}
           {app.canChange && (
             <AddAppConnection
               appId={app.id}
@@ -78,7 +81,8 @@ async function AppView({ params, children }: { params: Params; children: React.R
               // Signing in again is for whoever signed in: a teammate's sign-in isn't theirs to renew.
               .filter((connection) => connection.signIn === "oauth" && connection.status === "invalid" && connection.mine)
               .map(({ id, name }) => ({ id, name }))}
-            others={app.connections.filter((connection) => connection.needsSignIn).map(({ id, name }) => ({ id, name }))}
+            // A guest can't sign in to a workspace's sources: only its members can.
+            others={app.guest ? [] : app.connections.filter((connection) => connection.needsSignIn).map(({ id, name }) => ({ id, name }))}
           />
         </>
       }
@@ -91,6 +95,7 @@ async function AppView({ params, children }: { params: Params; children: React.R
               app={{ id: app.id, name: app.name, teamAccess: app.teamAccess }}
               workspace={member.orgs.find((org) => org.id === app.orgId)?.name ?? "your workspace"}
               personalConnections={app.connections.filter((connection) => connection.sharing === "personal").length}
+              guests={guests.map(({ email }) => email)}
             />
             <AppMenu
               app={{ id: app.id, name: app.name, dashboardCount: app.dashboards.length }}

@@ -3,9 +3,11 @@ import { and, asc, count, desc, eq, inArray, ne, or, sql } from "drizzle-orm";
 import type { Database } from "@/lib/db";
 import {
   appConnections,
+  appGuests,
   apps,
   dashboards,
   dataConnections,
+  orgMembers,
   users,
   type AppTeamAccess,
   type ConnectionSharing,
@@ -13,10 +15,18 @@ import {
 } from "@/lib/db/schema";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import { logError } from "@/lib/log";
-import { accessFor, appAccess, canBuild, canChange, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
+import { accessFor, appAccess, canBuild, canChange, canManageMembers, roleIn, type AppAccess, type Scope } from "@/lib/orgs/access";
 
 import { fail, forbidden, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
-import { addAppConnectionSchema, appIdSchema, appRefSchema, createAppSchema, renameAppSchema, teamAccessSchema } from "./schemas";
+import {
+  addAppConnectionSchema,
+  appGuestSchema,
+  appIdSchema,
+  appRefSchema,
+  createAppSchema,
+  renameAppSchema,
+  teamAccessSchema,
+} from "./schemas";
 
 export type AppConnectionBadge = { id: string; name: string };
 
@@ -31,6 +41,15 @@ export type AppSummary = {
   /** Its owner's email, when that isn't the caller. */
   sharedBy: string | null;
 };
+
+/** Someone outside the workspace who may view an app. */
+export type AppGuest = { email: string; invitedBy: string | null; invitedAt: Date };
+
+/** A guest of an app, as a workspace's admins see them: on which app. */
+export type WorkspaceGuest = AppGuest & { appId: string; appName: string };
+
+/** How many people outside the workspace may view one app. */
+export const MAX_GUESTS_PER_APP = 50;
 
 export type AppTreeNode = {
   id: string;
@@ -49,6 +68,10 @@ export type AppDetail = {
   access: AppAccess;
   /** Whether the caller may build in it: chat, rename, change its dashboards. Never true for a viewer. */
   canChange: boolean;
+  /** The caller is a guest: not in the app's workspace, let in to view this app alone. */
+  guest: boolean;
+  /** How many people outside the workspace can view it. */
+  guestCount: number;
   teamAccess: AppTeamAccess;
   pendingPrompt: string | null;
   /** The data sources picked for the pending prompt, by name. */
@@ -215,6 +238,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
             .orderBy(asc(dataConnections.name))
         : [];
 
+      const [{ guestCount }] = await db.select({ guestCount: count() }).from(appGuests).where(eq(appGuests.appId, app.id));
       const badges = await connectionBadges([app.id]);
       // The servers the caller has signed in to themselves: a teammate's sign-in to the same server is covered by theirs.
       const others = badges.filter((badge) => badge.sharing === "personal" && badge.ownerId !== userId);
@@ -231,6 +255,8 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         orgId: grant.orgId,
         access: grant.access,
         canChange: grant.canChange,
+        guest: grant.guest,
+        guestCount,
         pendingConnections,
         dashboards: appDashboards,
         connections: badges.map(({ id, name, type, status, config, sharing, ownerId }) => ({
@@ -326,6 +352,127 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         await db.update(apps).set({ teamAccess: parsed.data.teamAccess, updatedAt: now() }).where(eq(apps.id, parsed.data.id));
         return ok(undefined);
       });
+    },
+
+    /**
+     * The apps this user may view as a guest: listed by email on an app of a
+     * workspace they aren't in. Most recently updated first.
+     */
+    async sharedWithGuest(userId: string): Promise<AppTreeNode[]> {
+      const appRows = await db
+        .select({ id: apps.id, name: apps.name, orgId: apps.orgId })
+        .from(appGuests)
+        .innerJoin(users, eq(users.email, appGuests.email))
+        .innerJoin(apps, eq(apps.id, appGuests.appId))
+        .where(eq(users.id, userId))
+        .orderBy(desc(apps.updatedAt), desc(apps.id));
+      if (!appRows.length) return [];
+      // An app of a workspace they're in shows there, with whatever that membership gives them.
+      const memberOf = new Set(
+        (await db.select({ orgId: orgMembers.orgId }).from(orgMembers).where(eq(orgMembers.userId, userId))).map((row) => row.orgId),
+      );
+      const guestOf = appRows.filter((app) => app.orgId && !memberOf.has(app.orgId));
+      if (!guestOf.length) return [];
+      const dashboardRows = await db
+        .select({ appId: dashboards.appId, id: dashboards.id, title: dashboards.title })
+        .from(dashboards)
+        .where(
+          inArray(
+            dashboards.appId,
+            guestOf.map((app) => app.id),
+          ),
+        )
+        .orderBy(asc(dashboards.position), asc(dashboards.createdAt));
+      return guestOf.map(({ id, name }) => ({
+        id,
+        name,
+        canChange: false,
+        dashboards: dashboardRows.filter((dashboard) => dashboard.appId === id).map(({ id: dashboardId, title }) => ({ id: dashboardId, title })),
+      }));
+    },
+
+    /** The people outside the workspace who may view an app, for whoever can change it. */
+    async guests(userId: string, appId: string): Promise<AppGuest[]> {
+      const grant = await appAccess(db, userId, appId);
+      if (!grant?.canChange) return [];
+      return db
+        .select({ email: appGuests.email, invitedBy: users.email, invitedAt: appGuests.createdAt })
+        .from(appGuests)
+        .leftJoin(users, eq(users.id, appGuests.invitedBy))
+        .where(eq(appGuests.appId, appId))
+        .orderBy(asc(appGuests.createdAt));
+    },
+
+    /**
+     * Lets someone outside the workspace view the whole app, by email: every
+     * dashboard in it, read-only, and nothing else of the workspace. For
+     * anyone who can change the app. Refused while the app uses a personal
+     * sign-in, which a guest could never query through.
+     */
+    addGuest(userId: string, input: unknown): Promise<AppResult> {
+      return guard("addGuest", async () => {
+        const parsed = appGuestSchema.safeParse(input);
+        if (!parsed.success) return parsed.error.issues[0]?.path[0] === "id" ? notFound() : fromValidation(parsed.error);
+        const { id, email } = parsed.data;
+        const grant = await appAccess(db, userId, id);
+        if (!grant) return notFound();
+        if (!grant.canChange) return forbidden();
+
+        const personal = (await connectionBadges([id])).filter((connection) => connection.sharing === "personal");
+        if (personal.length) {
+          return fail({
+            code: "validation",
+            field: "email",
+            message: `This app uses ${personal.map((connection) => connection.name).join(", ")} with a personal sign-in, which a guest can't query. Share that connection with the workspace, or remove it from the app, first.`,
+          });
+        }
+        const [{ total }] = await db.select({ total: count() }).from(appGuests).where(eq(appGuests.appId, id));
+        if (total >= MAX_GUESTS_PER_APP) {
+          return fail({ code: "validation", field: "email", message: `An app can have up to ${MAX_GUESTS_PER_APP} guests.` });
+        }
+        const added = await db.insert(appGuests).values({ appId: id, email, invitedBy: userId }).onConflictDoNothing().returning();
+        if (!added.length) return fail({ code: "validation", field: "email", message: `${email} can already view this app.` });
+        return ok(undefined);
+      });
+    },
+
+    /**
+     * Takes a guest's access to an app away, at once. For anyone who can
+     * change the app, and for the workspace's admins, who oversee every guest
+     * even on apps they can't open.
+     */
+    removeGuest(userId: string, input: unknown): Promise<AppResult> {
+      return guard("removeGuest", async () => {
+        const parsed = appGuestSchema.safeParse(input);
+        if (!parsed.success) return notFound();
+        const { id, email } = parsed.data;
+        const grant = await appAccess(db, userId, id);
+        if (!grant?.canChange) {
+          const [app] = await db.select({ orgId: apps.orgId }).from(apps).where(eq(apps.id, id)).limit(1);
+          const role = app ? await roleIn(db, userId, app.orgId) : null;
+          if (!role) return notFound();
+          if (!canManageMembers(role)) return grant ? forbidden() : notFound();
+        }
+        await db.delete(appGuests).where(and(eq(appGuests.appId, id), eq(appGuests.email, email)));
+        return ok(undefined);
+      });
+    },
+
+    /**
+     * Every guest of every app in a workspace, for its admins: who was let
+     * in from outside, on which app, by whom. Private apps included, by name
+     * only.
+     */
+    async workspaceGuests(scope: Scope): Promise<WorkspaceGuest[]> {
+      const role = await roleIn(db, scope.userId, scope.orgId);
+      if (!role || !canManageMembers(role)) return [];
+      return db
+        .select({ appId: apps.id, appName: apps.name, email: appGuests.email, invitedBy: users.email, invitedAt: appGuests.createdAt })
+        .from(appGuests)
+        .innerJoin(apps, eq(apps.id, appGuests.appId))
+        .leftJoin(users, eq(users.id, appGuests.invitedBy))
+        .where(eq(apps.orgId, scope.orgId))
+        .orderBy(asc(apps.name), asc(appGuests.createdAt));
     },
 
     /**

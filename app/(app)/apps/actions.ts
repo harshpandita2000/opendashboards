@@ -86,6 +86,39 @@ export async function setAppTeamAccessAction(input: unknown): Promise<AppResult>
   return result;
 }
 
+const guestInput = z.object({ id: z.uuid(), email: z.string().max(300) }).strict();
+
+/**
+ * Lets someone outside the workspace view an app, by email. Its dashboards
+ * are shared with the app's groups in OpenUI Cloud first (as when it's shared
+ * with the workspace), so the guest can load them.
+ */
+export async function addAppGuestAction(input: unknown): Promise<AppResult> {
+  const user = await requireUser();
+  const parsed = guestInput.safeParse(input);
+  if (!parsed.success) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  const app = await getAppService().get(user.id, parsed.data.id);
+  if (!app) return fail({ code: "not_found", message: "This app doesn't exist or was deleted." });
+  if (!app.canChange) return fail({ code: "forbidden", message: "You can view this app, but you can't change who it's shared with." });
+  const shared = await shareDashboardsWithApp(app.id, app.dashboards.map((dashboard) => dashboard.artifactId));
+  if (!shared) return fail({ code: "internal", message: "OpenUI Cloud couldn't share the app's dashboards. Nothing changed. Try again." });
+  const result = await getAppService().addGuest(user.id, parsed.data);
+  if (result.ok) {
+    // That a guest was added, never who.
+    track(user.id, "app_guest_added", { app_id: app.id });
+    revalidateShell();
+  }
+  return result;
+}
+
+/** Takes a guest's access to an app away. For whoever can change the app, and the workspace's admins. */
+export async function removeAppGuestAction(input: unknown): Promise<AppResult> {
+  const user = await requireUser();
+  const result = await getAppService().removeGuest(user.id, input);
+  if (result.ok) revalidateShell();
+  return result;
+}
+
 /** Adds a connection the user can query to an app. */
 export async function addAppConnectionAction(input: unknown): Promise<AppResult> {
   const user = await requireUser();

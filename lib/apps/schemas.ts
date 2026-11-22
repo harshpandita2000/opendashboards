@@ -35,6 +35,19 @@ export const createAppSchema = z
   .strict();
 export const renameAppSchema = z.object({ id: appIdSchema, name: appNameSchema }).strict();
 export const appRefSchema = z.object({ id: appIdSchema }).strict();
+/** Someone outside the workspace who may view an app, by the email they sign in with. */
+export const appGuestSchema = z
+  .object({
+    id: appIdSchema,
+    email: z
+      .string()
+      .trim()
+      .max(254, "That email is too long.")
+      .pipe(z.email("Enter an email address."))
+      .transform((email) => email.toLowerCase()),
+  })
+  .strict();
+
 /** Who else in the workspace can open an app. */
 export const teamAccessSchema = z.object({ id: appIdSchema, teamAccess: z.enum(["private", "view", "edit"]) }).strict();
 export const addAppConnectionSchema = z.object({ appId: appIdSchema, connectionId: z.uuid() }).strict();

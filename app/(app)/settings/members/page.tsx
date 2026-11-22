@@ -5,6 +5,7 @@ import { Suspense } from "react";
 import { SectionLabel } from "@/components/page-header";
 import {
   DeleteWorkspaceButton,
+  GuestRow,
   InviteForm,
   LeaveWorkspaceButton,
   MemberRow,
@@ -12,6 +13,7 @@ import {
   WorkspaceName,
 } from "@/components/settings/members";
 import { Skeleton } from "@/components/ui/skeleton";
+import { getAppService } from "@/lib/apps";
 import { getOrgService, requireMember } from "@/lib/orgs";
 import { canManageMembers } from "@/lib/orgs/access";
 
@@ -34,6 +36,8 @@ async function Members() {
   if (!org) notFound();
 
   const admin = canManageMembers(org.role);
+  // Everyone let in from outside, on any app here: for admins to oversee.
+  const guests = admin ? await getAppService().workspaceGuests(member) : [];
   const admins = org.members.filter((entry) => entry.role === "admin").length;
   return (
     <>
@@ -78,6 +82,23 @@ async function Members() {
           <ul className="divide-y rounded-xl border">
             {org.invites.map((invite) => (
               <PendingInviteRow key={invite.email} orgId={org.id} invite={{ email: invite.email, role: invite.role }} canManage={admin} />
+            ))}
+          </ul>
+        </section>
+      )}
+
+      {guests.length > 0 && (
+        <section aria-labelledby="guests" className="mt-10">
+          <SectionLabel id="guests">Guests</SectionLabel>
+          <p className="-mt-1 mb-3 text-sm text-muted-foreground">
+            People outside the workspace who can view one of its apps. They see that app and nothing else.
+          </p>
+          <ul className="divide-y rounded-xl border">
+            {guests.map((guest) => (
+              <GuestRow
+                key={`${guest.appId}:${guest.email}`}
+                guest={{ appId: guest.appId, appName: guest.appName, email: guest.email, invitedBy: guest.invitedBy }}
+              />
             ))}
           </ul>
         </section>

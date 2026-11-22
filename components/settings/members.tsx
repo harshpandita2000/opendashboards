@@ -14,6 +14,7 @@ import {
   renameOrgAction,
   revokeInviteAction,
 } from "@/app/(app)/settings/actions";
+import { removeAppGuestAction } from "@/app/(app)/apps/actions";
 import { InlineRename } from "@/components/inline-rename";
 import { AvatarCircle } from "@/components/shell/avatar-circle";
 import {
@@ -264,6 +265,33 @@ export function PendingInviteRow({
           Cancel
         </Button>
       )}
+    </li>
+  );
+}
+
+/** One guest of one app, for the workspace's admins: who, on which app, let in by whom. */
+export function GuestRow({ guest }: { guest: { appId: string; appName: string; email: string; invitedBy: string | null } }) {
+  const [pending, startTransition] = useTransition();
+  function remove() {
+    startTransition(async () => {
+      const result = await removeAppGuestAction({ id: guest.appId, email: guest.email });
+      if (!result.ok) toast.error(result.error.message);
+      else toast.success(`${guest.email} can no longer view ${guest.appName}`);
+    });
+  }
+  return (
+    <li className="flex items-center gap-3 p-3.5">
+      <AvatarCircle name={guest.email} className="bg-neutral-100 text-neutral-500" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{guest.email}</p>
+        <p className="truncate text-sm text-muted-foreground">
+          Can view {guest.appName}
+          {guest.invitedBy ? ` · added by ${guest.invitedBy}` : ""}
+        </p>
+      </div>
+      <Button variant="ghost" size="sm" onClick={remove} disabled={pending}>
+        Remove
+      </Button>
     </li>
   );
 }

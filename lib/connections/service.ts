@@ -15,7 +15,7 @@ import {
   type DataConnectionRow,
 } from "@/lib/db/schema";
 import { logError, logRejection, logWarning } from "@/lib/log";
-import { canManageConnections, isUuid, roleIn, type Scope } from "@/lib/orgs/access";
+import { appAccess, canManageConnections, isUuid, roleIn, type Scope } from "@/lib/orgs/access";
 import { count } from "@/lib/metrics";
 import type { SecretBox, SecretContext } from "@/lib/secrets";
 import { MAX_SECRET_BYTES, SecretTooLargeError, secretBytes, type SealedSecret } from "@/lib/secrets/types";
@@ -248,6 +248,31 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
       )
       .orderBy(asc(dataConnections.createdAt));
     return { theirs: found.row, own: mine.find((row) => serverOf(row) === server) ?? null };
+  }
+
+  /**
+   * A connection for a guest of an app: someone outside the workspace, let in
+   * to view that app. Only one of the workspace's own connections (never a
+   * personal sign-in) that the app already uses.
+   */
+  async function forGuest(userId: string, appId: string, connectionId: string) {
+    if (!isUuid(connectionId)) return null;
+    const grant = await appAccess(db, userId, appId);
+    if (!grant?.guest) return null;
+    const [row] = await db
+      .select({ connection: dataConnections })
+      .from(appConnections)
+      .innerJoin(dataConnections, eq(dataConnections.id, appConnections.connectionId))
+      .where(
+        and(
+          eq(appConnections.appId, appId),
+          eq(appConnections.connectionId, connectionId),
+          eq(dataConnections.orgId, grant.orgId),
+          eq(dataConnections.sharing, "org"),
+        ),
+      )
+      .limit(1);
+    return row?.connection ?? null;
   }
 
   /** A connection the caller may manage, as a result: missing and "use only" stay distinct. */
@@ -702,16 +727,21 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * if it belongs to that org too: an app only ever queries its own org's
      * connections. A teammate's personal sign-in opens as the caller's own
      * sign-in to the same server (the returned `id` is then theirs), never as
-     * the teammate. Server code only; the credential never leaves the server.
+     * the teammate. With `appId`, a guest of that app (who isn't in its
+     * workspace) can open the workspace's connections that the app uses, and
+     * no others. Server code only; the credential never leaves the server.
      */
     async open(
       userId: string,
       connectionId: string,
       type: ConnectionType,
-      { orgId }: { orgId?: string } = {},
+      { orgId, appId }: { orgId?: string; appId?: string } = {},
     ): Promise<OpenConnection<Record<string, unknown>> | null> {
       // Someone else's personal sign-in opens as the caller's own sign-in to the same server, or not at all.
-      const row = (await find(userId, connectionId))?.row ?? (await someoneElsesSignIn(userId, connectionId))?.own;
+      const row =
+        (await find(userId, connectionId))?.row ??
+        (await someoneElsesSignIn(userId, connectionId))?.own ??
+        (appId ? await forGuest(userId, appId, connectionId) : null);
       if (!row || row.type !== type) return null;
       if (orgId !== undefined && row.orgId !== orgId) return null;
       if (row.demoDataset !== null) {

@@ -373,3 +373,127 @@ describe("a teammate's personal sign-in in a shared app", () => {
     });
   });
 });
+
+describe("guests of an app", () => {
+  /** Ed's private app in Acme, with Gina (in no workspace with them) let in by email. */
+  async function withGuest() {
+    const shared = await app("ed");
+    expect(await appsService.addGuest("ed", { id: shared.appId, email: "Gina@Example.com" })).toEqual({ ok: true, data: undefined });
+    return shared;
+  }
+
+  beforeEach(async () => {
+    await seedWorkspaces(db, ["gina"]);
+  });
+
+  it("see the whole app, read-only, and nothing else of the workspace", async () => {
+    const { appId } = await withGuest();
+    const other = await app("ed");
+    await dashboards.record("ed", appId, { artifactId: "art_g1", title: "Signups" });
+
+    expect(await appAccess(db, "gina", appId)).toMatchObject({ access: "view", canChange: false, guest: true, orgId: acme });
+    expect(await appsService.get("gina", appId)).toMatchObject({ access: "view", canChange: false, guest: true });
+    expect((await dashboards.list("gina", appId)).map((row) => row.title)).toEqual(["Signups"]);
+    expect(await dashboards.findByArtifact("gina", "art_g1")).toMatchObject({ appId });
+    expect((await appsService.sharedWithGuest("gina")).map(({ id, canChange }) => ({ id, canChange }))).toEqual([{ id: appId, canChange: false }]);
+
+    // Nothing else: not the workspace's other apps, its lists, or anything that changes the app.
+    expect(await appsService.get("gina", other.appId)).toBeNull();
+    expect(await appsService.list(inAcme("gina"))).toEqual([]);
+    expect(await appsService.tree(inAcme("gina"))).toEqual([]);
+    expect(await connections.list(inAcme("gina"))).toEqual([]);
+    expect(await appsService.rename("gina", { id: appId, name: "Mine" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.setTeamAccess("gina", { id: appId, teamAccess: "edit" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.addGuest("gina", { id: appId, email: "friend@example.com" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.guests("gina", appId)).toEqual([]);
+    expect(await threads.register("gina", appId, { threadId: "thread_g", title: "Hi" })).toMatchObject({ ok: false });
+    expect(await dashboards.record("gina", appId, { artifactId: "art_g2", title: "Extra" })).toBeNull();
+  });
+
+  it("are whoever signs in with that email, and nobody else", async () => {
+    const { appId } = await withGuest();
+    expect(await appAccess(db, "mallory", appId)).toBeNull();
+    expect(await appsService.sharedWithGuest("mallory")).toEqual([]);
+    // The team's own members are unaffected: the app is still private to them.
+    expect(await appAccess(db, "alice", appId)).toBeNull();
+  });
+
+  it("are told to OpenUI Cloud as holding the app's view group", async () => {
+    const { appId } = await withGuest();
+    expect(cloudIdentity("gina", (await appAccess(db, "gina", appId))!)).toEqual({ userId: "gina", groupIds: [appGroups(appId).view] });
+  });
+
+  it("query through the connections the app uses, and no others", async () => {
+    const { appId, connectionId } = await withGuest();
+    const unused = await keyed("alice", "Unused");
+
+    expect(await connections.open("gina", connectionId, "posthog", { orgId: acme, appId })).toMatchObject({ id: connectionId });
+    // Not a connection the app doesn't use, not without the app, not through another app.
+    expect(await connections.open("gina", unused, "posthog", { orgId: acme, appId })).toBeNull();
+    expect(await connections.open("gina", connectionId, "posthog", { orgId: acme })).toBeNull();
+    const other = await app("ed");
+    expect(await connections.open("gina", other.connectionId, "posthog", { orgId: acme, appId })).toBeNull();
+    expect(await connections.open("mallory", connectionId, "posthog", { orgId: acme, appId })).toBeNull();
+  });
+
+  it("can't be added to an app that uses a personal sign-in", async () => {
+    const { appId } = await app("ed");
+    const eds = await signedIn("ed");
+    await appsService.addConnection("ed", { appId, connectionId: eds });
+    const result = await appsService.addGuest("ed", { id: appId, email: "gina@example.com" });
+    expect(result).toMatchObject({ ok: false, error: { code: "validation", field: "email" } });
+    expect(result.ok ? "" : result.error.message).toContain("Linear");
+    expect(await appAccess(db, "gina", appId)).toBeNull();
+  });
+
+  it("never query through a personal sign-in added to the app later", async () => {
+    const { appId } = await withGuest();
+    const eds = await signedIn("ed");
+    await appsService.addConnection("ed", { appId, connectionId: eds });
+    expect(await connections.open("gina", eds, "mcp", { orgId: acme, appId })).toBeNull();
+    expect(await connections.signInNeeded("gina", eds)).toBeNull();
+  });
+
+  it("are invited by anyone who can change the app, and by nobody who can only view it", async () => {
+    const { appId } = await app("ed", "edit");
+    expect(await appsService.addGuest("vera", { id: appId, email: "gina@example.com" })).toMatchObject({ ok: false, error: { code: "forbidden" } });
+    expect(await appsService.addGuest("mallory", { id: appId, email: "gina@example.com" })).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(await appsService.addGuest("alice", { id: appId, email: "not an email" })).toMatchObject({ ok: false, error: { code: "validation", field: "email" } });
+    expect(await appsService.addGuest("alice", { id: appId, email: "gina@example.com" })).toEqual({ ok: true, data: undefined });
+    expect(await appsService.addGuest("ed", { id: appId, email: "GINA@example.com" })).toMatchObject({ ok: false, error: { code: "validation" } });
+    expect((await appsService.guests("ed", appId)).map(({ email, invitedBy }) => ({ email, invitedBy }))).toEqual([
+      { email: "gina@example.com", invitedBy: "alice@example.com" },
+    ]);
+    expect((await appsService.get("ed", appId))?.guestCount).toBe(1);
+  });
+
+  it("lose access the moment they're removed", async () => {
+    const { appId, connectionId } = await withGuest();
+    expect(await appsService.removeGuest("ed", { id: appId, email: "gina@example.com" })).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "gina", appId)).toBeNull();
+    expect(await connections.open("gina", connectionId, "posthog", { orgId: acme, appId })).toBeNull();
+    expect(await appsService.sharedWithGuest("gina")).toEqual([]);
+  });
+
+  it("are all visible to the workspace's admins, who can remove any of them, even on an app they can't open", async () => {
+    const { appId } = await withGuest();
+    expect(await appsService.get("alice", appId)).toBeNull();
+    expect((await appsService.workspaceGuests(inAcme("alice"))).map(({ appId: id, email, invitedBy }) => ({ id, email, invitedBy }))).toEqual([
+      { id: appId, email: "gina@example.com", invitedBy: "ed@example.com" },
+    ]);
+    // Oversight is for admins.
+    for (const member of ["ed", "vera", "mallory", "gina"]) expect(await appsService.workspaceGuests(inAcme(member))).toEqual([]);
+    expect(await appsService.removeGuest("vera", { id: appId, email: "gina@example.com" })).toMatchObject({ ok: false, error: { code: "not_found" } });
+    expect(await appsService.removeGuest("mallory", { id: appId, email: "gina@example.com" })).toMatchObject({ ok: false, error: { code: "not_found" } });
+
+    expect(await appsService.removeGuest("alice", { id: appId, email: "gina@example.com" })).toEqual({ ok: true, data: undefined });
+    expect(await appAccess(db, "gina", appId)).toBeNull();
+  });
+
+  it("go with the app when it's deleted", async () => {
+    const { appId } = await withGuest();
+    await appsService.remove("ed", { id: appId });
+    expect(await appsService.sharedWithGuest("gina")).toEqual([]);
+    expect(await appsService.workspaceGuests(inAcme("alice"))).toEqual([]);
+  });
+});

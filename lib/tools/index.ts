@@ -79,7 +79,10 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
       }
       const { connection: connectionId, ...toolArgs } = parsed.data;
 
-      const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType, { orgId: context.orgId });
+      const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType, {
+        orgId: context.orgId,
+        appId: context.appId,
+      });
       if (!connection) {
         // A teammate's personal sign-in: this person's queries run as themselves, so they sign in too.
         const theirs = await getConnectionService().signInNeeded(context.userId, connectionId);

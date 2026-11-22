@@ -8,7 +8,7 @@ import { getDb } from "@/lib/db";
 import { createAppService, type AppService } from "./service";
 import { createThreadService, type ThreadService } from "./threads";
 
-export type { AppDetail, AppSummary, AppTreeNode } from "./service";
+export type { AppDetail, AppGuest, AppSummary, AppTreeNode, WorkspaceGuest } from "./service";
 export type { AppThread } from "./threads";
 
 let appService: AppService | undefined;

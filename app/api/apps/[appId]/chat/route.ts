@@ -78,12 +78,12 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
 
   /**
    * A dashboard follows its app: one created in an app shared with the
-   * workspace is shared too, once the turn that made it is over. (OpenUI Cloud
+   * workspace or with guests is shared too, once the turn that made it is over. (OpenUI Cloud
    * names a dashboard before it has finished building it, and can't share it
    * until then.) If that fails, saving the app's Share dialog shares it again.
    */
   const shareCreated = async () => {
-    if (!turn.created.length || app.teamAccess === "private") return;
+    if (!turn.created.length || (app.teamAccess === "private" && app.guestCount === 0)) return;
     if (!(await shareDashboardsWithApp(appId, turn.created))) logError("chat.shareCreated", new Error("New dashboards weren't shared with the app's groups"));
   };
 

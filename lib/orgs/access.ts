@@ -1,7 +1,7 @@
 import { and, eq } from "drizzle-orm";
 
 import type { Database } from "@/lib/db";
-import { apps, orgMembers, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
+import { appGuests, apps, orgMembers, users, type AppTeamAccess, type OrgRole } from "@/lib/db/schema";
 
 /**
  * Who may do what. Every permission question in OpenDashboards is answered
@@ -49,23 +49,49 @@ export async function roleIn(db: Database, userId: string, orgId: string | null)
   return row?.role ?? null;
 }
 
-export type AppGrant = { appId: string; orgId: string; ownerId: string; role: OrgRole; access: AppAccess; canChange: boolean };
+export type AppGrant = {
+  appId: string;
+  orgId: string;
+  ownerId: string;
+  /** Their role in the app's workspace. A guest is treated as a viewer of this one app. */
+  role: OrgRole;
+  access: AppAccess;
+  canChange: boolean;
+  /** Not a member of the app's workspace: let in to view this app alone, by email. */
+  guest: boolean;
+};
 
 /**
- * What the user may do with an app, or null: it doesn't exist, they aren't a
- * member of its org, or it isn't shared with them. Looked up by the app's own
- * org, not the one the user has open, so a link to an app works from anywhere.
+ * What the user may do with an app, or null: it doesn't exist, or nothing
+ * lets them in. A member of its workspace gets what their role and the app's
+ * team access allow. Anyone else gets in only as a guest: to view, if the app
+ * lists the email they signed in with. Looked up by the app's own workspace,
+ * not the one the user has open, so a link to an app works from anywhere.
  */
 export async function appAccess(db: Database, userId: string, appId: string): Promise<AppGrant | null> {
   if (!isUuid(appId)) return null;
   const [row] = await db
     .select({ orgId: apps.orgId, ownerId: apps.userId, teamAccess: apps.teamAccess, role: orgMembers.role })
     .from(apps)
-    .innerJoin(orgMembers, and(eq(orgMembers.orgId, apps.orgId), eq(orgMembers.userId, userId)))
+    .leftJoin(orgMembers, and(eq(orgMembers.orgId, apps.orgId), eq(orgMembers.userId, userId)))
     .where(eq(apps.id, appId))
     .limit(1);
   if (!row?.orgId) return null;
-  const access = accessFor({ userId: row.ownerId, teamAccess: row.teamAccess }, userId, row.role);
-  if (!access) return null;
-  return { appId, orgId: row.orgId, ownerId: row.ownerId, role: row.role, access, canChange: canChange(access, row.role) };
+  const { orgId, ownerId } = row;
+  const access = row.role ? accessFor({ userId: ownerId, teamAccess: row.teamAccess }, userId, row.role) : null;
+  if (access && row.role) return { appId, orgId, ownerId, role: row.role, access, canChange: canChange(access, row.role), guest: false };
+  // Not through the workspace: only as a guest of this app.
+  if (!(await isGuest(db, userId, appId))) return null;
+  return { appId, orgId, ownerId, role: "viewer", access: "view", canChange: false, guest: true };
+}
+
+/** Whether the app lists the email this user signed in with among its guests. */
+export async function isGuest(db: Database, userId: string, appId: string): Promise<boolean> {
+  const [row] = await db
+    .select({ email: appGuests.email })
+    .from(appGuests)
+    .innerJoin(users, eq(users.email, appGuests.email))
+    .where(and(eq(appGuests.appId, appId), eq(users.id, userId)))
+    .limit(1);
+  return Boolean(row);
 }
