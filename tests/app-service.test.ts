@@ -203,10 +203,11 @@ describe("tree", () => {
     ]);
 
     expect(await appsService.tree(workspaceOf("alice"))).toEqual([
-      { id: second, name: "Production: App 2", canChange: true, dashboards: [] },
+      { id: second, name: "Production: App 2", mine: true, canChange: true, dashboards: [] },
       {
         id: first,
         name: "Production: App 1",
+        mine: true,
         canChange: true,
         dashboards: [
           { id: expect.any(String), title: "First tab" },

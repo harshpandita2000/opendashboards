@@ -1,13 +1,14 @@
 "use client";
 
 import { OpenUICloudProvider } from "@openuidev/react-ui/cloud";
-import { ChevronLeftIcon, PanelRightCloseIcon, SparklesIcon, XIcon } from "lucide-react";
+import { PanelRightCloseIcon, SparklesIcon, XIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createContext, use, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { renameAppAction } from "@/app/(app)/apps/actions";
 import { InlineRename } from "@/components/inline-rename";
+import { OpenSidebarButton } from "@/components/shell/sidebar";
 import { Button } from "@/components/ui/button";
 import { appPath, dashboardPath, frontendTokenPath, parseAppPath } from "@/lib/apps/paths";
 import { cn } from "@/lib/utils";
@@ -202,14 +203,9 @@ export function AppWorkspace({
       {/* The Build panel runs the full height beside the dashboard column, header included. */}
       <div className="relative flex h-full min-h-0">
         <div className="flex min-w-0 flex-1 flex-col">
-          <header className="flex h-12 shrink-0 items-center gap-2 border-b px-2">
-            <Link
-              href="/apps"
-              aria-label="All apps"
-              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground hover:bg-neutral-100 hover:text-foreground"
-            >
-              <ChevronLeftIcon className="size-4" aria-hidden />
-            </Link>
+          <header data-app-header className="flex h-12 shrink-0 items-center gap-2 border-b px-2">
+            {/* Only while the sidebar is collapsed: it lives here, so nothing is left beside the content. */}
+            <OpenSidebarButton />
             {readOnly ? (
               <h1 className="min-w-0 truncate px-1.5 py-1 text-sm font-semibold">{name}</h1>
             ) : (

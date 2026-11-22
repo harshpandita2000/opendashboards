@@ -6,10 +6,9 @@ import { AnalyticsUser } from "@/components/analytics-user";
 import { AppsTree } from "@/components/shell/apps-tree";
 import { Brand } from "@/components/shell/brand";
 import { Footer } from "@/components/shell/footer";
-import { MobileNav } from "@/components/shell/mobile-nav";
 import { NavLink } from "@/components/shell/nav-link";
+import { OpenSidebarButton, Sidebar } from "@/components/shell/sidebar";
 import { SidebarUser, SidebarUserFallback } from "@/components/shell/sidebar-user";
-import { UserAvatar, UserAvatarFallback } from "@/components/shell/user-avatar";
 import { requireUser } from "@/lib/auth/user";
 
 /** Everything in here is a signed-in user's own; only the landing page is for crawlers. */
@@ -17,12 +16,12 @@ export const metadata: Metadata = { robots: { index: false, follow: false } };
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex h-dvh bg-neutral-50">
+    <div className="app-shell flex h-dvh bg-neutral-50">
       <Suspense fallback={null}>
         <IdentifyUser />
       </Suspense>
-      {/* md and up: the sidebar holds the brand, the nav, and the user. */}
-      <aside className="hidden w-60 shrink-0 flex-col px-2 py-3 md:flex">
+      {/* The brand, the nav and the user. Beside the content on a wide screen, where it can be collapsed; floating over it on a phone. */}
+      <Sidebar>
         <HomeLink className="mb-3 flex h-9 shrink-0 items-center px-2" />
         <nav aria-label="Main" className="flex min-h-0 flex-1 flex-col">
           {/* The home page is where an app starts: its composer, then the app grid. */}
@@ -35,7 +34,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
           <div className="shrink-0 border-t pt-2">
             <NavLink href="/connections" label="Data Connections" icon="connections" />
-            <NavLink href="/settings/members" label="Workspace" icon="team" />
+            <NavLink href="/settings" label="Workspace" icon="team" />
           </div>
         </nav>
         <div className="mt-1 shrink-0">
@@ -43,21 +42,13 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
             <SidebarUser />
           </Suspense>
         </div>
-      </aside>
+      </Sidebar>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        {/* Below md the sidebar is hidden; this bar replaces it. */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-2 px-4 md:hidden">
-          <div className="flex items-center gap-2">
-            <MobileNav />
-            <HomeLink />
-          </div>
-          <Suspense fallback={<UserAvatarFallback />}>
-            <UserAvatar />
-          </Suspense>
-        </header>
-
-        <main className="mx-2 min-h-0 flex-1 overflow-y-auto rounded-xl border bg-background md:mt-2 md:ml-0">
+        {/* With the sidebar collapsed the left margin matches the right (app/globals.css). */}
+        <main data-main className="relative mx-2 mt-2 min-h-0 flex-1 overflow-y-auto rounded-xl border bg-background md:ml-0">
+          {/* The way back to a collapsed sidebar, on pages whose own header doesn't carry one. */}
+          <OpenSidebarButton floating className="absolute top-2.5 left-2 z-10" />
           {children}
         </main>
         <Footer />

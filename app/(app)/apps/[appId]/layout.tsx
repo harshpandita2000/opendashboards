@@ -13,6 +13,7 @@ import { BuildChat } from "@/components/apps/build-chat";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getAppService, getCurrentUserApp, type AppDetail } from "@/lib/apps";
 import { OpenAppOrg } from "@/components/shell/open-app-org";
+import { GuestAppMarker } from "@/components/shell/sidebar";
 import { requireMember } from "@/lib/orgs";
 import { getConnectionService } from "@/lib/connections";
 
@@ -52,6 +53,8 @@ async function AppView({ params, children }: { params: Params; children: React.R
 
   return (
     <>
+    {/* A guest came for the dashboard: the sidebar starts collapsed for them. */}
+    {app.guest && <GuestAppMarker />}
     {/* A guest isn't in the app's workspace, so there's nothing of theirs to open there. */}
     {!app.guest && member.orgId !== app.orgId && <OpenAppOrg orgId={app.orgId} />}
     <AppWorkspace

@@ -120,9 +120,9 @@ export function OrgSwitcher({
           ))}
           <DropdownMenuSeparator />
           <DropdownMenuItem asChild>
-            <Link href="/settings/members">
+            <Link href="/settings">
               <UsersIcon aria-hidden />
-              Members
+              Workspace settings
             </Link>
           </DropdownMenuItem>
           <DropdownMenuItem onSelect={() => setCreating(true)}>
@@ -171,7 +171,7 @@ export function CreateWorkspaceDialog({ open, onOpenChange }: { open: boolean; o
       }
       onOpenChange(false);
       setName("");
-      router.push("/settings/members");
+      router.push("/settings");
     });
   }
 

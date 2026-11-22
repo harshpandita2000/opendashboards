@@ -304,7 +304,10 @@ describe("sharing an app", () => {
       { id: appId, mine: false, sharedBy: "ed@example.com" },
     ]);
     expect((await appsService.list(inAcme("ed")))[0]).toMatchObject({ mine: true, sharedBy: null });
-    expect((await appsService.tree(inAcme("alice"))).map(({ id, canChange }) => ({ id, canChange }))).toEqual([{ id: appId, canChange: true }]);
+    expect((await appsService.tree(inAcme("alice"))).map(({ id, mine, canChange }) => ({ id, mine, canChange }))).toEqual([
+      { id: appId, mine: false, canChange: true },
+    ]);
+    expect((await appsService.tree(inAcme("ed"))).map(({ id, mine }) => ({ id, mine }))).toEqual([{ id: appId, mine: true }]);
     expect((await appsService.tree(inAcme("vera"))).map(({ id, canChange }) => ({ id, canChange }))).toEqual([{ id: appId, canChange: false }]);
   });
 

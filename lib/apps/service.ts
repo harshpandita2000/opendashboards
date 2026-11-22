@@ -54,6 +54,8 @@ export const MAX_GUESTS_PER_APP = 50;
 export type AppTreeNode = {
   id: string;
   name: string;
+  /** Whether the caller owns it. Otherwise a teammate shared it with the workspace, or they're its guest. */
+  mine: boolean;
   /** Whether the caller may rename or delete its dashboards. False when they can only view it. */
   canChange: boolean;
   dashboards: { id: string; title: string }[];
@@ -192,6 +194,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 
       return appRows.map(({ userId: ownerId, teamAccess, ...app }) => ({
         ...app,
+        mine: ownerId === scope.userId,
         canChange: canChange(accessFor({ userId: ownerId, teamAccess }, scope.userId, role) ?? "view", role),
         dashboards: dashboardRows
           .filter((dashboard) => dashboard.appId === app.id)
@@ -386,6 +389,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       return guestOf.map(({ id, name }) => ({
         id,
         name,
+        mine: false,
         canChange: false,
         dashboards: dashboardRows.filter((dashboard) => dashboard.appId === id).map(({ id: dashboardId, title }) => ({ id: dashboardId, title })),
       }));

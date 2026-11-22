@@ -2,7 +2,7 @@
 
 import { Loader2Icon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useState, useTransition } from "react";
+import { useId, useState, useTransition } from "react";
 import { toast } from "sonner";
 
 import {
@@ -15,7 +15,6 @@ import {
   revokeInviteAction,
 } from "@/app/(app)/settings/actions";
 import { removeAppGuestAction } from "@/app/(app)/apps/actions";
-import { InlineRename } from "@/components/inline-rename";
 import { AvatarCircle } from "@/components/shell/avatar-circle";
 import {
   AlertDialog,
@@ -73,43 +72,60 @@ function RoleSelect({
   );
 }
 
-/** The workspace's name as the page title. An admin clicks it to rename it. */
-export function WorkspaceName({ orgId, name, editable }: { orgId: string; name: string; editable: boolean }) {
-  const [renaming, setRenaming] = useState(false);
-  const [shown, setShown] = useState(name);
-  const heading = "text-[1.75rem] leading-tight font-bold tracking-tight";
-  if (!editable) return <h1 className={heading}>{name}</h1>;
-  if (renaming) {
-    return (
-      <h1>
-        <InlineRename
-          value={shown}
-          label="Workspace name"
-          maxLength={60}
-          onSave={(next) => renameOrgAction({ orgId, name: next })}
-          onDone={(next) => {
-            setShown(next);
-            setRenaming(false);
-          }}
-          className={cn(heading, "h-10 w-full")}
-        />
-      </h1>
-    );
+/** The workspace's name, for an admin to change. Everyone sees it in their switcher. */
+export function WorkspaceNameForm({ orgId, name }: { orgId: string; name: string }) {
+  const [value, setValue] = useState(name);
+  const [error, setError] = useState<string | null>(null);
+  const [pending, startTransition] = useTransition();
+  const changed = value.trim() !== name && value.trim() !== "";
+  const id = useId();
+
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    startTransition(async () => {
+      const result = await renameOrgAction({ orgId, name: value });
+      if (!result.ok) {
+        setError(result.error.message);
+        return;
+      }
+      toast.success("Workspace renamed");
+    });
   }
+
   return (
-    <h1>
-      <button
-        type="button"
-        onClick={() => setRenaming(true)}
-        title="Rename"
-        className={cn(
-          heading,
-          "-mx-1.5 cursor-text rounded-md px-1.5 text-left hover:bg-neutral-100 focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none",
+    <form onSubmit={submit} noValidate className="rounded-xl border">
+      <div className="p-4">
+        <label htmlFor={id} className="text-sm font-medium">
+          Workspace name
+        </label>
+        <p className="mt-0.5 text-sm text-muted-foreground">What everyone here sees in their workspace switcher.</p>
+        <Input
+          id={id}
+          value={value}
+          onChange={(event) => {
+            setValue(event.target.value);
+            setError(null);
+          }}
+          maxLength={60}
+          autoComplete="off"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? `${id}-error` : undefined}
+          className="mt-3 h-9 max-w-md"
+        />
+        {error && (
+          <p id={`${id}-error`} role="alert" className="mt-2 text-sm text-destructive">
+            {error}
+          </p>
         )}
-      >
-        {shown}
-      </button>
-    </h1>
+      </div>
+      <div className="flex items-center justify-between gap-3 rounded-b-xl border-t bg-neutral-50/70 px-4 py-2.5">
+        <p className="text-xs text-muted-foreground">Up to 60 characters.</p>
+        <Button type="submit" size="sm" disabled={pending || !changed}>
+          {pending && <Loader2Icon className="animate-spin" aria-hidden />}
+          Save
+        </Button>
+      </div>
+    </form>
   );
 }
 
@@ -150,7 +166,7 @@ export function InviteForm({ orgId }: { orgId: string }) {
             setError(null);
           }}
           aria-invalid={error ? true : undefined}
-          className="h-8 min-w-48 flex-1"
+          className="h-8 min-w-48 flex-1 bg-background"
         />
         <RoleSelect value={role} onChange={setRole} label="Role" />
         <Button type="submit" size="sm" disabled={pending || !email.trim()}>
@@ -258,7 +274,10 @@ export function PendingInviteRow({
   return (
     <li className="flex items-center gap-3 p-3.5">
       <AvatarCircle name={invite.email} className="bg-neutral-100 text-neutral-500" />
-      <p className="min-w-0 flex-1 truncate text-sm">{invite.email}</p>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium">{invite.email}</p>
+        <p className="text-sm text-muted-foreground">Hasn&apos;t signed in yet</p>
+      </div>
       <span className="text-sm text-muted-foreground">{roleLabel(invite.role)}</span>
       {canManage && (
         <Button variant="ghost" size="sm" onClick={revoke} disabled={pending}>
@@ -297,6 +316,38 @@ export function GuestRow({ guest }: { guest: { appId: string; appName: string; e
 }
 
 /**
+ * The actions that can't be taken back, set apart at the end of the page:
+ * leaving the workspace, and for an admin, deleting it.
+ */
+export function DangerZone({ orgId, name, canDelete }: { orgId: string; name: string; canDelete: boolean }) {
+  return (
+    <ul className="divide-y divide-destructive/20 rounded-xl border border-destructive/30">
+      <li className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3.5">
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">Leave this workspace</p>
+          <p className="text-sm text-muted-foreground">
+            You lose access to its apps and data connections. Apps you made here stay in it.
+          </p>
+        </div>
+        <LeaveWorkspaceButton orgId={orgId} name={name} />
+      </li>
+      {canDelete && (
+        <li className="flex flex-wrap items-center gap-x-4 gap-y-2 p-3.5">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium">Delete this workspace</p>
+            <p className="text-sm text-muted-foreground">
+              Deletes it for everyone: every member&apos;s apps and dashboards, its data connections and its member list. It
+              can&apos;t be undone.
+            </p>
+          </div>
+          <DeleteWorkspaceButton orgId={orgId} name={name} />
+        </li>
+      )}
+    </ul>
+  );
+}
+
+/**
  * Deletes the workspace and everything in it, for everyone. Admins only, and
  * only once its name is typed out: there is no undo.
  */
@@ -319,7 +370,7 @@ export function DeleteWorkspaceButton({ orgId, name }: { orgId: string; name: st
 
   return (
     <>
-      <Button variant="destructive" size="sm" onClick={() => setOpen(true)}>
+      <Button variant="destructive" size="sm" onClick={() => setOpen(true)} className="shrink-0">
         Delete workspace
       </Button>
       <Dialog
@@ -391,7 +442,7 @@ export function LeaveWorkspaceButton({ orgId, name }: { orgId: string; name: str
   }
   return (
     <>
-      <Button variant="outline" size="sm" onClick={() => setOpen(true)} disabled={pending}>
+      <Button variant="destructive" size="sm" onClick={() => setOpen(true)} disabled={pending} className="shrink-0">
         Leave workspace
       </Button>
       <AlertDialog open={open} onOpenChange={setOpen}>

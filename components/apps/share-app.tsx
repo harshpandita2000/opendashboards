@@ -1,6 +1,6 @@
 "use client";
 
-import { EyeIcon, Loader2Icon, LockIcon, PencilIcon, UsersIcon, XIcon } from "lucide-react";
+import { CheckIcon, EyeIcon, LinkIcon, Loader2Icon, LockIcon, PencilIcon, UsersIcon, XIcon } from "lucide-react";
 import { useState, useTransition } from "react";
 import { toast } from "sonner";
 
@@ -8,6 +8,7 @@ import { addAppGuestAction, removeAppGuestAction, setAppTeamAccessAction } from 
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { appPath } from "@/lib/apps/paths";
 import type { AppTeamAccess } from "@/lib/db/schema";
 import { cn } from "@/lib/utils";
 
@@ -124,6 +125,7 @@ export function ShareApp({
           )}
           <Guests appId={app.id} guests={guests} blocked={personalConnections > 0} />
           <DialogFooter>
+            <CopyLink appId={app.id} />
             <Button type="button" variant="outline" onClick={() => setOpen(false)} disabled={pending}>
               Cancel
             </Button>
@@ -220,5 +222,30 @@ function Guests({ appId, guests, blocked }: { appId: string; guests: string[]; b
         </ul>
       )}
     </section>
+  );
+}
+
+/**
+ * Copies the app's link, to send to whoever it's shared with. The link opens
+ * for nobody else: they still have to sign in as someone who's been let in.
+ */
+function CopyLink({ appId }: { appId: string }) {
+  const [copied, setCopied] = useState(false);
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(new URL(appPath(appId), window.location.origin).href);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      toast.error("Couldn't copy the link. Copy it from the address bar instead.");
+    }
+  }
+
+  return (
+    <Button type="button" variant="ghost" onClick={copy} className="sm:mr-auto">
+      {copied ? <CheckIcon aria-hidden /> : <LinkIcon aria-hidden />}
+      {copied ? "Link copied" : "Copy link"}
+    </Button>
   );
 }
