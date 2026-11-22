@@ -1,9 +1,26 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
 
-import { ConversationalArt, EditWidgetArt, HoverArt, LiveArt } from "./feature-art";
+import {
+  ConversationalArt,
+  EditWidgetArt,
+  HoverArt,
+  LiveArt,
+  SharingArt,
+  SourcesArt,
+} from "./feature-art";
 
 const FEATURES: { title: string; description: string; art: ReactNode }[] = [
+  {
+    title: "Share dashboards with your team",
+    description: "Give teammates view or edit access. Invite guests to view a shared app.",
+    art: <SharingArt />,
+  },
+  {
+    title: "See where a number came from",
+    description: "Open Sources to see which tools and queries fed a metric.",
+    art: <SourcesArt />,
+  },
   {
     title: "Conversational",
     description: "Ask what you need to know. Get a dashboard built for that question.",
@@ -19,9 +36,8 @@ const FEATURES: { title: string; description: string; art: ReactNode }[] = [
 ];
 
 /**
- * "Your data, your models, your servers": a centred statement, then four
- * cards two by two (one column on phones), each a scene on the hero's light
- * dither stage with a title and a line under it.
+ * The leading pair shows sharing and Sources. The remaining cards show
+ * the everyday dashboard workflow on the same stage.
  */
 export function Features() {
   return (
@@ -34,11 +50,10 @@ export function Features() {
           id="features-title"
           className="mx-auto max-w-208 text-center font-(family-name:--font-display) text-2xl leading-[1.1] font-semibold tracking-[-0.02em] text-balance md:text-[32px]"
         >
-          Your data, your models,
-          <br className="md:hidden" /> your servers
+          Dashboards your team can share and check
         </h2>
         <p className="mx-auto mt-4 max-w-144 text-center text-base leading-normal text-pretty text-neutral-950/60 md:text-[17px]">
-          Run OpenDashboards on your own infrastructure, with any model through the OpenUI Dashboards API.
+          Build a live dashboard from your connected tools and let your team trace the numbers back to the source.
         </p>
 
         <div className="mt-10 grid grid-cols-1 gap-10 md:mt-16 md:grid-cols-2 md:gap-x-4 md:gap-y-12 min-[56.25rem]:gap-x-6 min-[56.25rem]:gap-y-16">

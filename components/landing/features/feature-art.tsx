@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowUp, Check, MousePointer2 } from "lucide-react";
+import { ArrowUp, Check, Database, MousePointer2, Share2, Users } from "lucide-react";
 import Image from "next/image";
 import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
 
@@ -80,6 +80,48 @@ function Shot({ name }: { name: string }) {
       className="block h-auto max-w-none"
       style={{ width: SHOT_WIDTH }}
     />
+  );
+}
+
+/** Illustrations use the landing page's sample revenue dashboard. */
+export function SharingArt() {
+  return (
+    <Device>
+      <Shot name="wide-a" />
+      <div className="absolute top-15 left-10 w-[350px] rounded-[16px] border border-black/8 bg-white p-6 shadow-[0_14px_42px_rgb(0_0_0/0.15)]">
+        <div className="flex items-center gap-2.5 text-[22px] font-semibold tracking-tight">
+          <Share2 size={19} /> Share app
+        </div>
+        <div className="mt-5 flex items-center justify-between gap-3 border-y border-black/8 py-4 text-[16px]">
+          <span className="flex items-center gap-2.5 font-medium"><Users size={17} /> Workspace</span>
+          <span className="rounded-md bg-neutral-100 px-2.5 py-1 text-neutral-700">Can edit</span>
+        </div>
+        <div className="mt-3 flex items-center justify-between gap-3 text-[16px]">
+          <span className="font-medium">Guests</span>
+          <span className="rounded-md bg-neutral-100 px-2.5 py-1 text-neutral-700">Can view</span>
+        </div>
+      </div>
+    </Device>
+  );
+}
+
+export function SourcesArt() {
+  return (
+    <Device>
+      <Shot name="wide-a" />
+      <div className="absolute top-16 left-16 w-[340px] rounded-[16px] border border-black/8 bg-white p-6 shadow-[0_14px_42px_rgb(0_0_0/0.15)]">
+        <div className="flex items-center gap-2.5 text-[22px] font-semibold tracking-tight">
+          <Database size={19} /> Sources
+        </div>
+        <div className="mt-4 border-t border-black/8 pt-4">
+          <p className="text-[17px] font-medium">Total revenue</p>
+          <p className="mt-1 text-[16px] text-neutral-600">Postgres · Orders</p>
+          <code className="mt-3 block rounded-md bg-neutral-100 px-2.5 py-2 font-mono text-[15px] text-neutral-800">
+            SUM(orders.amount)
+          </code>
+        </div>
+      </div>
+    </Device>
   );
 }
 
