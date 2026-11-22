@@ -1,25 +1,19 @@
 import Image from "next/image";
 import type { ReactNode } from "react";
 
-import {
-  ConversationalArt,
-  EditWidgetArt,
-  HoverArt,
-  LiveArt,
-  SharingArt,
-  SourcesArt,
-} from "./feature-art";
+import { ConversationalArt, EditWidgetArt, HoverArt, LiveArt } from "./feature-art";
+import { SharingIllustration, SourcesIllustration } from "./LaunchIllustrations";
 
 const FEATURES: { title: string; description: string; art: ReactNode }[] = [
   {
     title: "Share dashboards with your team",
     description: "Give teammates view or edit access. Invite guests to view a shared app.",
-    art: <SharingArt />,
+    art: <SharingIllustration />,
   },
   {
     title: "See where a number came from",
     description: "Open Sources to see which tools and queries fed a metric.",
-    art: <SourcesArt />,
+    art: <SourcesIllustration />,
   },
   {
     title: "Conversational",
