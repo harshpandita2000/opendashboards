@@ -21,6 +21,8 @@
   "dependencies": {
     "@ag-ui/core": "0.0.53",
     "@aws-sdk/client-kms": "^3.1164.0",
+    "@azure/identity": "^4.14.1",
+    "@azure/keyvault-keys": "^4.10.2",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@openuidev/dashboard-library": "1.0.1",
     "@openuidev/lang-core": "1.1.0",

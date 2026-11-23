@@ -12,6 +12,7 @@ import {
   type SecretBox,
   type SecretContext,
   assertSecretSize,
+  boundContext,
 } from "./types";
 
 /** The part of the KMS client this provider uses, so tests can stand in for AWS. */
@@ -33,7 +34,7 @@ function countFailure(operation: "encrypt" | "decrypt", cause: unknown) {
 }
 
 /** KMS treats the encryption context as authenticated data: it must match to decrypt. */
-const encryptionContext = ({ purpose, userId, connectionId }: SecretContext) => ({ purpose, userId, connectionId });
+const encryptionContext = (context: SecretContext, orgBound: boolean) => boundContext(context, orgBound);
 
 /**
  * AWS KMS, reached through Vercel OIDC federation. `context` is the encryption
@@ -56,7 +57,7 @@ export function createKmsSecretBox(keyId: string, options: KmsOptions): SecretBo
           new EncryptCommand({
             KeyId: keyId,
             Plaintext: new TextEncoder().encode(plaintext),
-            EncryptionContext: encryptionContext(context),
+            EncryptionContext: encryptionContext(context, Boolean(context.orgId)),
           }),
         ));
       } catch (cause) {
@@ -64,7 +65,8 @@ export function createKmsSecretBox(keyId: string, options: KmsOptions): SecretBo
         throw new SecretStorageUnavailableError("KMS couldn't encrypt the secret", { cause });
       }
       if (!blob) throw new SecretStorageUnavailableError("KMS returned no ciphertext");
-      return { v: 1, provider: "kms", keyId, ciphertext: Buffer.from(blob).toString("base64") };
+      const sealed: SealedSecret = { v: 1, provider: "kms", keyId, ciphertext: Buffer.from(blob).toString("base64") };
+      return context.orgId ? { ...sealed, org: true } : sealed;
     },
 
     async open(sealed: SealedSecret, context: SecretContext): Promise<string> {
@@ -79,7 +81,7 @@ export function createKmsSecretBox(keyId: string, options: KmsOptions): SecretBo
             // The key it was sealed with, so secrets outlive a change of KMS_KEY_ID.
             KeyId: sealed.keyId,
             CiphertextBlob: Buffer.from(sealed.ciphertext, "base64"),
-            EncryptionContext: encryptionContext(context),
+            EncryptionContext: encryptionContext(context, sealed.org === true),
           }),
         ));
       } catch (cause) {
