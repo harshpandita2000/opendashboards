@@ -11,8 +11,8 @@ const FEATURES: { title: string; description: string; art: ReactNode }[] = [
     art: <SharingIllustration />,
   },
   {
-    title: "See where a number came from",
-    description: "Open Sources to see which tools and queries fed a metric.",
+    title: "Follow the build and inspect sources",
+    description: "Watch what the agent is checking, then open Sources to trace a dashboard number.",
     art: <SourcesIllustration />,
   },
   {
