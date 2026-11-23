@@ -9,3 +9,9 @@ if (!["localhost", "127.0.0.1", "[::1]"].includes(window.location.hostname)) {
   });
   posthog.register({ app: "opendashboards" });
 }
+
+// Optional: Sentry in the browser, only when NEXT_PUBLIC_SENTRY_DSN is set at build time.
+// The SDK is loaded lazily, so builds without it don't ship it in the main bundle.
+if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
+  void import("@/lib/observability/sentry").then(({ initSentry }) => initSentry("client"));
+}

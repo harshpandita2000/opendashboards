@@ -17,6 +17,9 @@ const requestSchema = z.object({
 /** Total budget for one data call, the dashboard's tools included. */
 const TIMEOUT_MS = 120_000;
 
+/** The 2-minute data budget above, plus headroom to answer when it runs out. */
+export const maxDuration = 150;
+
 /**
  * Runs a live dashboard's data calls. The dashboard must be this user's, and
  * the app its tools record usage against comes from OpenDashboards' own record of

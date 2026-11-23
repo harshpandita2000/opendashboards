@@ -20,6 +20,14 @@ type Ctx = { params: Promise<{ appId: string }> };
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
 
 /**
+ * A turn runs up to `openui.maxAgentRounds` model rounds, each of which may
+ * wait on data queries (up to 50 s for PostHog or BigQuery). Five minutes is
+ * the most every Vercel plan allows with Fluid compute; raise it (up to 800
+ * on Pro/Enterprise) if long turns get cut off.
+ */
+export const maxDuration = 300;
+
+/**
  * One turn of the Build chat. Runs the agent's tool loop over OpenUI Gateway
  * and streams it as AG-UI events (text, tool calls and their results) for
  * the chat's `agUIAdapter`. When the turn ends, or the user stops it, it's
