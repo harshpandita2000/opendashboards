@@ -15,7 +15,8 @@
     "db:up": "docker compose up -d --wait",
     "db:reset": "node scripts/db-reset.mjs",
     "db:generate": "drizzle-kit generate",
-    "db:migrate": "node scripts/db-migrate.mjs"
+    "db:migrate": "node scripts/db-migrate.mjs",
+    "spike:azure": "node scripts/azure-dashboard-spike/run.mjs"
   },
   "dependencies": {
     "@ag-ui/core": "0.0.53",
