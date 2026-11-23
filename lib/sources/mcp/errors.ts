@@ -1,4 +1,5 @@
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { SseError } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError as ProtocolError } from "@modelcontextprotocol/sdk/types.js";
 
@@ -77,7 +78,7 @@ export function toMcpError(error: unknown, { hasKey }: { hasKey: boolean }): Mcp
   }
   for (const e of chain) {
     if (e instanceof UnauthorizedError) return new McpError(hasKey ? "key_rejected" : "auth_required", trim(e.message));
-    if (e instanceof StreamableHTTPError) {
+    if (e instanceof StreamableHTTPError || e instanceof SseError) {
       if (e.code === 401) return new McpError(hasKey ? "key_rejected" : "auth_required", trim(e.message));
       if (e.code === 403) return new McpError("access_denied", trim(e.message));
       if (e.code === 404 || e.code === 405 || e.code === 406 || e.code === 415) return new McpError("not_mcp", trim(e.message));

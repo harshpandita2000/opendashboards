@@ -6,12 +6,18 @@ import type { SourceCatalog } from "../types";
 import { MCP_SERVICE_KEYS, mcpService } from "./services";
 
 /**
- * A remote MCP server: its Streamable HTTP endpoint, and which header carries
- * the API key. Safe for the browser: the key is the credential, never here.
+ * A remote MCP server: its endpoint, which header carries the API key, how to
+ * talk to it, and which of its tools may be used. Safe for the browser: the
+ * key and any other auth headers are the (sealed) credential, never here.
  */
 
+export const MCP_TRANSPORTS = ["auto", "streamable_http", "sse"] as const;
+export type McpTransport = (typeof MCP_TRANSPORTS)[number];
+
+export const MCP_TOOL_NAME = /^[A-Za-z0-9_.\-/]{1,128}$/;
+
 /** Headers the transport sets itself, or that would change where or how a request goes. */
-const RESERVED_HEADERS = new Set([
+export const RESERVED_HEADERS = new Set([
   "accept",
   "connection",
   "content-length",
@@ -68,6 +74,17 @@ const mcpSettingsSchema = z
       ),
     /** A known server from the catalog (lib/sources/mcp/services.ts). Absent for any other server. */
     service: z.enum(MCP_SERVICE_KEYS).optional(),
+    /**
+     * "auto" tries Streamable HTTP and falls back to the older HTTP+SSE
+     * transport when the endpoint doesn't speak it; or pin one.
+     */
+    transport: z.enum(MCP_TRANSPORTS).optional(),
+    /**
+     * The only tools members' agents and dashboards may use, by name, set by
+     * an admin. Absent or null: every tool the server marks read-only or
+     * doesn't annotate.
+     */
+    allowedTools: z.array(z.string().regex(MCP_TOOL_NAME, "Use tool names exactly as the server lists them.")).max(200).nullable().optional(),
   })
   .strict();
 
@@ -129,9 +146,77 @@ export const mcpStoredConfigSchema = mcpSettingsSchema.extend({ oauth: mcpOAuthS
 export type McpOAuthSettings = z.infer<typeof mcpOAuthSettingsSchema>;
 export type McpConfig = z.infer<typeof mcpStoredConfigSchema>;
 
-/** The key, or nothing for a public server. */
-/** The size that matters is checked in bytes when it's stored (lib/secrets): this only stops absurd input. */
-export const mcpKeySchema = z.string().trim().max(65_536, "That key is too long.");
+const HEADER_NAME = /^[A-Za-z0-9-]{1,64}$/;
+export const MAX_EXTRA_HEADERS = 10;
+
+/**
+ * Extra auth headers, as typed: one "Name: value" per line. Exported for the
+ * form and tests. Returns the headers, or the first problem.
+ */
+export function parseHeaderLines(text: string): { ok: true; headers: [string, string][] } | { ok: false; message: string } {
+  const headers: [string, string][] = [];
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) continue;
+    const colon = line.indexOf(":");
+    if (colon <= 0) return { ok: false, message: "Write one header per line, like X-Tenant: acme." };
+    const name = line.slice(0, colon).trim();
+    const value = line.slice(colon + 1).trim();
+    if (!HEADER_NAME.test(name)) return { ok: false, message: `${name.slice(0, 64)} isn't a valid header name.` };
+    if (RESERVED_HEADERS.has(name.toLowerCase())) return { ok: false, message: `${name} is set by OpenDashboards itself.` };
+    if (!value || value.length > 4_096 || /[\u0000-\u001f\u007f]/.test(value)) return { ok: false, message: `Enter a value for ${name} (one line, up to 4,096 characters).` };
+    if (headers.some(([existing]) => existing.toLowerCase() === name.toLowerCase())) return { ok: false, message: `${name} is listed twice.` };
+    headers.push([name, value]);
+  }
+  if (headers.length > MAX_EXTRA_HEADERS) return { ok: false, message: `Up to ${MAX_EXTRA_HEADERS} extra headers.` };
+  return { ok: true, headers };
+}
+
+/** An API key plus extra auth headers, as the one sealed credential. */
+export type McpKeyCredential = { key: string; headers: [string, string][] };
+
+/**
+ * Packs a key and extra headers into the credential string that's sealed.
+ * Just a key stays the key itself, as before extra headers existed.
+ */
+export function writeMcpKeyCredential({ key, headers }: McpKeyCredential): string {
+  if (!headers.length) return key;
+  return JSON.stringify({ kind: "headers", v: 1, key, headers });
+}
+
+/** The inverse of `writeMcpKeyCredential`: anything that isn't the packed form is a plain key. */
+export function readMcpKeyCredential(credential: string): McpKeyCredential {
+  if (credential.startsWith("{")) {
+    try {
+      const parsed = JSON.parse(credential) as { kind?: unknown; key?: unknown; headers?: unknown };
+      if (parsed.kind === "headers" && typeof parsed.key === "string" && Array.isArray(parsed.headers)) {
+        const headers = (parsed.headers as unknown[]).filter(
+          (pair): pair is [string, string] => Array.isArray(pair) && pair.length === 2 && pair.every((part) => typeof part === "string"),
+        );
+        return { key: parsed.key, headers };
+      }
+    } catch {
+      // A key that happens to start with "{".
+    }
+  }
+  return { key: credential, headers: [] };
+}
+
+/**
+ * The key, or nothing for a public server; or the packed key and extra
+ * headers, whose headers are checked like typed ones.
+ * The size that matters is checked in bytes when it's stored (lib/secrets): this only stops absurd input.
+ */
+export const mcpKeySchema = z
+  .string()
+  .trim()
+  .max(65_536, "That key is too long.")
+  .superRefine((credential, ctx) => {
+    const { headers } = readMcpKeyCredential(credential);
+    if (!headers.length) return;
+    const checked = parseHeaderLines(headers.map(([name, value]) => `${name}: ${value}`).join("\n"));
+    if (!checked.ok) ctx.addIssue({ code: "custom", message: checked.message });
+  });
 
 export const mcpCatalog: SourceCatalog<McpConfig, "mcp"> = {
   // What a form may submit: never the OAuth details, which only a finished sign-in sets.

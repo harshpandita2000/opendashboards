@@ -12,14 +12,32 @@ const eslintConfig = defineConfig([
         { argsIgnorePattern: "^_", varsIgnorePattern: "^_" },
       ],
       // Connectors only talk to remote servers: the MCP SDK's stdio transport starts
-      // a program on our side, and its SSE transport lets the server pick the URL we post to.
+      // a program on our side. Its SSE transport lets the server pick the URL we post
+      // to, so it's used only in lib/sources/mcp, behind the single-origin guarded fetch.
       "no-restricted-imports": [
         "error",
         {
           patterns: [
             {
               group: ["@modelcontextprotocol/sdk/client/stdio*", "@modelcontextprotocol/sdk/client/sse*", "@modelcontextprotocol/sdk/client/websocket*"],
-              message: "Only the Streamable HTTP transport, through lib/sources/mcp, is allowed.",
+              message: "Only remote MCP transports, through lib/sources/mcp, are allowed.",
+            },
+          ],
+        },
+      ],
+    },
+  },
+  {
+    // The SSE fallback, pinned to the server's origin by the guarded fetch.
+    files: ["lib/sources/mcp/client.ts", "lib/sources/mcp/errors.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        {
+          patterns: [
+            {
+              group: ["@modelcontextprotocol/sdk/client/stdio*", "@modelcontextprotocol/sdk/client/websocket*"],
+              message: "Only remote MCP transports are allowed.",
             },
           ],
         },
