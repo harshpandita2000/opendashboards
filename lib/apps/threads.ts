@@ -3,6 +3,7 @@ import { and, desc, eq, lt, or } from "drizzle-orm";
 import type { Database } from "@/lib/db";
 import { appThreads, apps } from "@/lib/db/schema";
 import { logError } from "@/lib/log";
+import type { Scope } from "@/lib/orgs/scope";
 
 import { fail, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
 import { appIdSchema, registerThreadSchema, renameThreadSchema, threadIdSchema } from "./schemas";
@@ -15,25 +16,27 @@ const PAGE_SIZE = 30;
 /**
  * Which app each chat thread belongs to. Threads live in OpenUI Cloud, which
  * has no notion of apps; this mapping is what scopes a thread list to one
- * app. Every call checks the app belongs to the user, and a thread belongs to
- * exactly one app.
+ * app. Every call checks the app belongs to the caller's organisation, and a
+ * thread belongs to exactly one app. Threads stay private to the member who
+ * started them: teammates see the dashboards, not each other's chats.
  */
 export function createThreadService({ db, now = () => new Date() }: { db: Database; now?: () => Date }) {
-  async function ownsApp(userId: string, appId: string) {
+  async function ownsApp(scope: Scope, appId: string) {
     if (!appIdSchema.safeParse(appId).success) return false;
     const [row] = await db
       .select({ id: apps.id })
       .from(apps)
-      .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
+      .where(and(eq(apps.id, appId), eq(apps.orgId, scope.orgId)))
       .limit(1);
     return Boolean(row);
   }
 
-  const scope = (userId: string, appId: string, threadId: string) =>
+  const threadWhere = (scope: Scope, appId: string, threadId: string) =>
     and(
       eq(appThreads.threadId, threadId),
       eq(appThreads.appId, appId),
-      eq(appThreads.userId, userId),
+      eq(appThreads.orgId, scope.orgId),
+      eq(appThreads.userId, scope.userId),
     );
 
   async function guard<T>(operation: string, fn: () => Promise<AppResult<T>>): Promise<AppResult<T>> {
@@ -48,12 +51,12 @@ export function createThreadService({ db, now = () => new Date() }: { db: Databa
   return {
     /** The app's threads, most recently active first, a page at a time. */
     list(
-      userId: string,
+      scope: Scope,
       appId: string,
       cursor?: string | null,
     ): Promise<AppResult<{ threads: AppThread[]; nextCursor?: string }>> {
       return guard("list", async () => {
-        if (!(await ownsApp(userId, appId))) return notFound();
+        if (!(await ownsApp(scope, appId))) return notFound();
         const after = cursor ? decodeCursor(cursor) : null;
         if (cursor && !after) return fail({ code: "validation", message: "Invalid cursor." });
 
@@ -63,7 +66,8 @@ export function createThreadService({ db, now = () => new Date() }: { db: Databa
           .where(
             and(
               eq(appThreads.appId, appId),
-              eq(appThreads.userId, userId),
+              eq(appThreads.orgId, scope.orgId),
+              eq(appThreads.userId, scope.userId),
               after
                 ? or(
                     lt(appThreads.updatedAt, after.updatedAt),
@@ -98,23 +102,23 @@ export function createThreadService({ db, now = () => new Date() }: { db: Databa
      * Registering the same thread for the same app again is a no-op; a thread
      * already mapped elsewhere is refused.
      */
-    register(userId: string, appId: string, input: unknown): Promise<AppResult<AppThread>> {
+    register(scope: Scope, appId: string, input: unknown): Promise<AppResult<AppThread>> {
       return guard("register", async () => {
         const parsed = registerThreadSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
-        if (!(await ownsApp(userId, appId))) return notFound();
+        if (!(await ownsApp(scope, appId))) return notFound();
         const { threadId, title } = parsed.data;
 
         const [inserted] = await db
           .insert(appThreads)
-          .values({ threadId, appId, userId, title })
+          .values({ threadId, appId, userId: scope.userId, orgId: scope.orgId, title })
           .onConflictDoNothing()
           .returning();
         const row =
           inserted ??
           (await db.select().from(appThreads).where(eq(appThreads.threadId, threadId)).limit(1))[0];
 
-        if (!row || row.appId !== appId || row.userId !== userId) {
+        if (!row || row.appId !== appId || row.userId !== scope.userId || row.orgId !== scope.orgId) {
           return fail({
             code: "thread_conflict",
             message: "This conversation belongs to another app.",
@@ -124,7 +128,7 @@ export function createThreadService({ db, now = () => new Date() }: { db: Databa
       });
     },
 
-    rename(userId: string, appId: string, threadId: string, input: unknown): Promise<AppResult> {
+    rename(scope: Scope, appId: string, threadId: string, input: unknown): Promise<AppResult> {
       return guard("rename", async () => {
         const parsed = renameThreadSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
@@ -132,41 +136,41 @@ export function createThreadService({ db, now = () => new Date() }: { db: Databa
         const updated = await db
           .update(appThreads)
           .set({ title: parsed.data.title, updatedAt: now() })
-          .where(scope(userId, appId, threadId))
+          .where(threadWhere(scope, appId, threadId))
           .returning({ id: appThreads.threadId });
         return updated.length ? ok(undefined) : notFound();
       });
     },
 
     /** Removes the mapping. The Cloud conversation is deleted by the caller. */
-    remove(userId: string, appId: string, threadId: string): Promise<AppResult> {
+    remove(scope: Scope, appId: string, threadId: string): Promise<AppResult> {
       return guard("remove", async () => {
         if (!threadIdSchema.safeParse(threadId).success) return notFound();
         const deleted = await db
           .delete(appThreads)
-          .where(scope(userId, appId, threadId))
+          .where(threadWhere(scope, appId, threadId))
           .returning({ id: appThreads.threadId });
         return deleted.length ? ok(undefined) : notFound();
       });
     },
 
     /** Whether the thread belongs to this app and user. The chat route checks this before every turn. */
-    async belongsTo(userId: string, appId: string, threadId: string): Promise<boolean> {
+    async belongsTo(scope: Scope, appId: string, threadId: string): Promise<boolean> {
       if (!appIdSchema.safeParse(appId).success || !threadIdSchema.safeParse(threadId).success) {
         return false;
       }
       const [row] = await db
         .select({ id: appThreads.threadId })
         .from(appThreads)
-        .where(scope(userId, appId, threadId))
+        .where(threadWhere(scope, appId, threadId))
         .limit(1);
       return Boolean(row);
     },
 
     /** Moves the thread to the top of the app's list. The chat route calls it on each turn. */
-    async touch(userId: string, appId: string, threadId: string): Promise<void> {
+    async touch(scope: Scope, appId: string, threadId: string): Promise<void> {
       if (!threadIdSchema.safeParse(threadId).success) return;
-      await db.update(appThreads).set({ updatedAt: now() }).where(scope(userId, appId, threadId));
+      await db.update(appThreads).set({ updatedAt: now() }).where(threadWhere(scope, appId, threadId));
     },
   };
 }

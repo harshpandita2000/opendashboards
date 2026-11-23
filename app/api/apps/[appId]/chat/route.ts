@@ -6,14 +6,16 @@ import type { ChatCompletionMessageParam } from "openai/resources/chat/completio
 
 import { secrets } from "@/config";
 import { track } from "@/lib/analytics";
-import { agentTools, getGateway, maxRounds, model, SYSTEM_PROMPT, type TurnContext } from "@/lib/agent";
+import { agentTools, getGateway, maxRounds, SYSTEM_PROMPT, type TurnContext } from "@/lib/agent";
 import { createAgUiTranslator, sse } from "@/lib/agent/ag-ui";
 import { answerStoppedCalls, chatBodySchema, VIEWING_DASHBOARD, type ChatBody } from "@/lib/agent/messages";
 import { getAppService, getThreadService } from "@/lib/apps";
 import { getDashboardService } from "@/lib/dashboards";
-import { HttpError, readJson, route } from "@/lib/http";
+import { HttpError, readJson } from "@/lib/http";
 import { addLogContext, logError } from "@/lib/log";
 import { count } from "@/lib/metrics";
+import { chatModelFor, type ChatModel } from "@/lib/models";
+import { orgRoute } from "@/lib/orgs/route";
 
 type Ctx = { params: Promise<{ appId: string }> };
 
@@ -33,7 +35,7 @@ export const maxDuration = 300;
  * the chat's `agUIAdapter`. When the turn ends, or the user stops it, it's
  * saved to the thread in OpenUI Cloud.
  */
-export const POST = route<Ctx>(async (request, user, { params }) => {
+export const POST = orgRoute<Ctx>("member", async (request, { user, scope }, { params }) => {
   const { appId } = await params;
   addLogContext({ app: appId });
   const parsed = chatBodySchema.safeParse(await readJson(request, { maxBytes: MAX_BODY_BYTES }));
@@ -43,16 +45,16 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
   addLogContext({ thread: threadId, run: runId });
 
   const threads = getThreadService();
-  if (!(await threads.belongsTo(user.id, appId, threadId))) throw new HttpError(404, "Thread not found");
+  if (!(await threads.belongsTo(scope, appId, threadId))) throw new HttpError(404, "Thread not found");
 
   // What's on screen, if it's one of this app's dashboards: "this dashboard" means that one.
   const viewingId = context?.find((entry) => entry.description === VIEWING_DASHBOARD)?.value;
   const viewing = viewingId
-    ? (await getDashboardService().list(user.id, appId)).find((row) => row.artifactId === viewingId)
+    ? (await getDashboardService().list(scope, appId)).find((row) => row.artifactId === viewingId)
     : undefined;
   const system: ChatCompletionMessageParam[] = [{ role: "system", content: SYSTEM_PROMPT }];
   // The data sources the user put in this app: the agent works from these unless asked otherwise.
-  const app = await getAppService().get(user.id, appId);
+  const app = await getAppService().get(scope, appId);
   if (app?.connections.length) {
     const list = app.connections.map((connection) => `${connection.name} (${connection.type}, id ${connection.id})`).join("; ");
     system.push({
@@ -68,7 +70,16 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
   }
 
   const encoder = new TextEncoder();
-  const turn: TurnContext = { userId: user.id, appId, signal: request.signal, dashboards: [] };
+  const turn: TurnContext = {
+    userId: scope.cloudUserId,
+    orgId: scope.orgId,
+    actorUserId: user.id,
+    appId,
+    signal: request.signal,
+    dashboards: [],
+  };
+  // The organisation's own model (Azure OpenAI), if it has one; else OpenUI Gateway.
+  const llm = await chatModelFor(scope.orgId, getGateway);
 
   const startedAt = Date.now();
   const trackTurn = (outcome: string, cause: string, turnMessages: ChatCompletionMessageParam[]) => {
@@ -79,6 +90,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
       cause,
       duration_ms: Date.now() - startedAt,
       tool_calls: results.length,
+      model_provider: llm.provider,
       tool_errors: results.filter((message) => typeof message.content === "string" && message.content.startsWith('{"error":')).length,
       dashboards_changed: turn.dashboards.length,
     });
@@ -90,9 +102,10 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
       const translate = createAgUiTranslator(emit);
       emit({ type: EventType.RUN_STARTED, threadId, runId } as BaseEvent);
 
-      const runner = getGateway().chat.completions.runTools(
+      const runner = llm.client.chat.completions.runTools(
         {
-          model: model(),
+          model: llm.model,
+          ...llm.extra,
           messages: [...system, ...messages],
           tools: agentTools(),
           toolContext: turn,
@@ -113,7 +126,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
             conversationId: threadId,
             messages: turnMessages,
           });
-          await threads.touch(user.id, appId, threadId);
+          await threads.touch(scope, appId, threadId);
         } catch (error) {
           logError("chat.save", error);
         }
@@ -137,15 +150,17 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
               ? [{ role: "assistant", content: writing.content ?? null, tool_calls: writing.tool_calls }]
               : [];
           waitUntil(save(answerStoppedCalls([...newMessages(), ...partial])));
+          void llm.close();
           controller.close();
           return;
         }
         logError("chat.turn", error);
-        const failure = turnFailure(error);
+        const failure = turnFailure(error, llm);
         count("opendashboards.chat.turn", { outcome: "failed", cause: failure.cause });
         trackTurn("failed", failure.cause, newMessages());
         translate.finish();
         emit({ type: EventType.RUN_ERROR, message: failure.message } as BaseEvent);
+        void llm.close();
         controller.close();
         return; // Failed: save nothing.
       }
@@ -154,6 +169,7 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
       const turnMessages = newMessages();
       trackTurn("completed", "none", turnMessages);
       await save(turnMessages);
+      void llm.close();
       controller.close();
     },
   });
@@ -164,7 +180,16 @@ export const POST = route<Ctx>(async (request, user, { params }) => {
 });
 
 /** What the chat shows when a turn fails, OpenUI Gateway's refusals by name, and a label for alerts. */
-function turnFailure(error: unknown): { cause: string; message: string } {
+function turnFailure(error: unknown, llm: Pick<ChatModel, "provider" | "providerName">): { cause: string; message: string } {
+  if (error instanceof APIError && llm.provider !== "openui") {
+    const status = error.status ?? (typeof error.code === "string" ? Number(error.code) : undefined);
+    const name = `Your organisation's model provider (${llm.providerName})`;
+    if (status === 429) return { cause: "rate_limited", message: `${name} is rate-limiting requests right now. Try again in a minute.` };
+    if (status === 401 || status === 403) return { cause: "key_refused", message: `${name} refused its credentials. An admin can check it in Settings → Models.` };
+    if (status === 404) return { cause: "not_found", message: `${name} has no such deployment. An admin can check it in Settings → Models.` };
+    if (status === 400) return { cause: "bad_request", message: `${name} rejected the request (HTTP 400). Check the deployment supports tool calling.` };
+    if (typeof status === "number" && status >= 500) return { cause: "upstream_error", message: `${name} had an error (HTTP ${status}). Try again.` };
+  }
   if (error instanceof APIError) {
     // An error Gateway sends inside the stream has no HTTP status; its code carries it ("429").
     const status = error.status ?? (typeof error.code === "string" ? Number(error.code) : undefined);

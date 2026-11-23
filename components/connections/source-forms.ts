@@ -4,7 +4,7 @@ import { bigqueryConfigSchema } from "@/lib/sources/bigquery/catalog";
 import { CLICKHOUSE_DEFAULT_PORT, clickhouseConfigSchema, clickhousePasswordSchema } from "@/lib/sources/clickhouse/catalog";
 import { ga4ConfigSchema } from "@/lib/sources/ga4/catalog";
 import { projectIdOfKey, serviceAccountKeySchema } from "@/lib/sources/google/credential";
-import { mcpConfigSchema, mcpKeySchema } from "@/lib/sources/mcp/catalog";
+import { mcpConfigSchema, mcpKeySchema, parseHeaderLines, writeMcpKeyCredential } from "@/lib/sources/mcp/catalog";
 import type { McpAuth, McpService } from "@/lib/sources/mcp/services";
 import { MYSQL_DEFAULT_PORT, mysqlConfigSchema, mysqlPasswordSchema, parseMysqlUrl } from "@/lib/sources/mysql/catalog";
 import { searchConsoleConfigSchema } from "@/lib/sources/searchconsole/catalog";
@@ -38,6 +38,12 @@ export type FormSpec = {
   fields: FieldSpec[];
   /** The secret: a password or a key. The only field shown when replacing it. */
   credential: FieldSpec;
+  /**
+   * More secret input sealed with the credential (an MCP server's extra auth
+   * headers), shown with it, also when replacing it. `combine` packs both into
+   * the one credential the server receives, or says what's wrong.
+   */
+  credentialExtra?: { field: FieldSpec; combine: (credential: string, extra: string) => { ok: true; credential: string } | { ok: false; message: string } };
   replaceTitle: string;
   replaceAction: string;
   /** A connection URL people may paste instead of filling in the fields. */
@@ -55,6 +61,23 @@ export type FormSpec = {
    */
   schemas: { config: z.ZodType; credential: z.ZodType };
 };
+
+/** An MCP server's extra auth headers: sealed with its key, never stored in the clear. */
+const MCP_EXTRA_HEADERS: FieldSpec = {
+  name: "extraHeaders",
+  label: "Extra auth headers",
+  kind: "textarea",
+  optional: true,
+  keyOnly: true,
+  placeholder: "X-Tenant-Id: acme\nX-Api-Secret: …",
+  description: "One per line, Name: value. Encrypted with the key and sent only to this server. Replacing the key replaces these too.",
+};
+
+function combineMcpCredential(credential: string, extra: string) {
+  const parsed = parseHeaderLines(extra);
+  if (!parsed.ok) return parsed;
+  return { ok: true as const, credential: writeMcpKeyCredential({ key: credential.trim(), headers: parsed.headers }) };
+}
 
 /** A password a public, read-only server may not need. */
 const NO_PASSWORD_OK: FieldSpec = {
@@ -257,6 +280,7 @@ GRANT SELECT ON your_db.* TO dashboards_reader;`,
       optional: true,
       description: "Leave empty for a public server. Prefer a key that can only read: dashboards call tools every time they open.",
     },
+    credentialExtra: { field: MCP_EXTRA_HEADERS, combine: combineMcpCredential },
     replaceTitle: "Replace key",
     replaceAction: "Test & replace",
     secretNoun: "keys",

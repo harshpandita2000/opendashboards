@@ -51,12 +51,12 @@ describe("signing in to a known server", () => {
   const service = {} as ConnectionService;
 
   it("refuses a server that only takes a key", async () => {
-    const result = await startMcpSignIn("user-1", { name: "GitHub", service: "github" }, { service });
+    const result = await startMcpSignIn({ orgId: "00000000-0000-4000-8000-000000000001", userId: "user-1" }, { name: "GitHub", service: "github" }, { service });
     expect(result).toMatchObject({ ok: false, error: { code: "validation" } });
   });
 
   it("refuses a URL sent along with a preset", async () => {
-    const result = await startMcpSignIn("user-1", { name: "Linear", service: "linear", url: "https://evil.example.com/mcp" }, { service });
+    const result = await startMcpSignIn({ orgId: "00000000-0000-4000-8000-000000000001", userId: "user-1" }, { name: "Linear", service: "linear", url: "https://evil.example.com/mcp" }, { service });
     expect(result).toMatchObject({ ok: false, error: { code: "validation" } });
   });
 });

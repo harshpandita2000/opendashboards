@@ -4,7 +4,7 @@ import { z } from "zod";
 
 import type { ConnectionSource, OpenConnection, SourceError, SourceTool } from "../types";
 
-import { mcpCatalog, mcpKeySchema, type McpConfig } from "./catalog";
+import { mcpCatalog, mcpKeySchema, MCP_TOOL_NAME, readMcpKeyCredential, type McpConfig } from "./catalog";
 import { callMcpTool, listMcpTools, testMcpServer, type McpTarget } from "./client";
 import { McpError } from "./errors";
 import {
@@ -28,7 +28,7 @@ export async function withCredential<T>(
   testHooks?: OAuthTestHooks,
 ): Promise<T> {
   const { config } = connection;
-  if (!config.oauth) return fn({ ...config, credential: connection.credential });
+  if (!config.oauth) return fn(keyTarget(config, connection.credential));
 
   let credential = readOAuthCredential(connection.credential);
   if (!credential.tokens) throw new McpError("reauth_required");
@@ -47,6 +47,12 @@ export async function withCredential<T>(
       throw retryError;
     }
   }
+}
+
+/** A key connection's target: the key and any extra headers sealed with it. */
+function keyTarget(config: McpConfig, credential: string): McpTarget {
+  const { key, headers } = readMcpKeyCredential(credential);
+  return { ...config, credential: key, extraHeaders: headers };
 }
 
 /**
@@ -87,10 +93,11 @@ const toolsTool: SourceTool<McpConfig, Record<string, never>> = {
   parameters: z.object({}),
   output: [{ name: "list_invoices", title: "List invoices", description: "Invoices, newest first.", inputSchema: { type: "object", properties: { limit: { type: "number" } } } }],
   callers: ["agent"],
-  execute: (connection, _args, { signal }) => withCredential(connection, (target) => listMcpTools(target, { signal })),
+  execute: (connection, _args, { signal }) =>
+    withCredential(connection, (target) => listMcpTools(target, { signal, sessionKey: connection.id })),
 };
 
-const TOOL_NAME = /^[A-Za-z0-9_.\-/]{1,128}$/;
+const TOOL_NAME = MCP_TOOL_NAME;
 
 const callTool: SourceTool<McpConfig, { tool: string; arguments?: Record<string, unknown> }> = {
   name: "mcp_call",
@@ -112,7 +119,7 @@ const callTool: SourceTool<McpConfig, { tool: string; arguments?: Record<string,
   },
   callers: ["agent", "dashboard"],
   execute: (connection, { tool, arguments: args = {} }, { signal }) =>
-    withCredential(connection, (target) => callMcpTool(target, tool, args, { signal })),
+    withCredential(connection, (target) => callMcpTool(target, tool, args, { signal, sessionKey: connection.id })),
 };
 
 const invalid = (error: SourceError) => ({ status: "invalid" as const, error });
@@ -133,7 +140,10 @@ export const mcpSource: ConnectionSource<McpConfig> = {
           // Not an OAuth credential: an API key that happens to start with "{".
         }
       }
-      return credential ? "API key ••••" : "no key";
+      const { key, headers } = readMcpKeyCredential(credential);
+      const extra = headers.length ? `${headers.length} header${headers.length === 1 ? "" : "s"}` : "";
+      if (key && extra) return `API key •••• + ${extra}`;
+      return key ? "API key ••••" : extra || "no key";
     },
   },
   async test(config, credential) {
@@ -143,7 +153,7 @@ export const mcpSource: ConnectionSource<McpConfig> = {
       if (!tokens) throw new McpError("reauth_required");
       await testMcpServer({ ...config, headerName: "Authorization", credential: tokens.access_token });
     } else {
-      await testMcpServer({ ...config, credential });
+      await testMcpServer(keyTarget(config, credential));
     }
     return [];
   },

@@ -8,7 +8,7 @@ import { Onboarding } from "@/components/onboarding/onboarding";
 import { SectionLabel } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getAppService, type AppSummary } from "@/lib/apps";
-import { requireUser } from "@/lib/auth/user";
+import { requireOrg } from "@/lib/orgs/current";
 import { getConnectionService } from "@/lib/connections";
 import { formatRelative } from "@/lib/format";
 import { getSecretMode } from "@/lib/secrets";
@@ -33,15 +33,15 @@ export default function AppsPage() {
 
 /** With no apps yet, onboarding takes the whole page; otherwise the composer and the apps. */
 async function Home() {
-  const user = await requireUser();
+  const { scope } = await requireOrg();
   const connectionService = getConnectionService();
   const [apps, connections] = await Promise.all([
-    getAppService().list(user.id),
-    connectionService.list(user.id),
+    getAppService().list(scope),
+    connectionService.list(scope),
   ]);
 
   if (!apps.length) {
-    const demos = await connectionService.listDemoDatasets(user.id);
+    const demos = await connectionService.listDemoDatasets(scope);
     return (
       <Onboarding
         connections={connections.map(({ id, name, shortSource, tile, demo }) => ({

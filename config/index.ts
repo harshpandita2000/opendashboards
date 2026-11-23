@@ -54,6 +54,10 @@ export const secrets = {
   kmsKeyId: () => process.env.KMS_KEY_ID,
   /** The AWS role Vercel OIDC assumes to use that key. Not secret, but set per deployment. */
   kmsRoleArn: () => process.env.KMS_ROLE_ARN,
+  /** Seals keys with Azure Key Vault instead: the vault key's id. Not secret; the app signs in with DefaultAzureCredential. */
+  azureKeyVaultKeyId: () => process.env.AZURE_KEY_VAULT_KEY_ID,
+  /** Seals keys with AES-256-GCM: base64 32-byte key(s), comma-separated, the first seals. For local and self-hosting. */
+  encryptionKeys: () => process.env.SECRETS_ENCRYPTION_KEY,
   /** The Supabase project whose JWTs say who a request is for. Not secret, but set per deployment. */
   supabaseUrl: () => process.env.SUPABASE_URL,
   /** Demo data: the password of the Demo Data project's read-only role. Unset locally: no demo datasets. */
@@ -107,11 +111,22 @@ export function secretProblems(name: Environment, settings: Settings, env: Env =
   if (settings.auth.devUser === null && !env.SUPABASE_URL) {
     problems.push(`SUPABASE_URL is not set; ${name} has no dev user, so requests must carry a verified token`);
   }
-  if (!settings.secrets.allowPlaintext && !env.KMS_KEY_ID) {
-    problems.push(`KMS_KEY_ID is not set; ${name} never stores keys unencrypted`);
+  if (!settings.secrets.allowPlaintext) {
+    const kms = Boolean(env.KMS_KEY_ID || env.KMS_ROLE_ARN);
+    if (kms && !env.KMS_KEY_ID) problems.push(`KMS_KEY_ID is not set, but KMS_ROLE_ARN is`);
+    if (kms && !env.KMS_ROLE_ARN) problems.push(`KMS_ROLE_ARN is not set; ${name} reaches KMS through Vercel OIDC`);
+    if (!kms && !env.AZURE_KEY_VAULT_KEY_ID && !env.SECRETS_ENCRYPTION_KEY) {
+      problems.push(`No secret storage: set KMS_KEY_ID and KMS_ROLE_ARN, AZURE_KEY_VAULT_KEY_ID, or SECRETS_ENCRYPTION_KEY; ${name} never stores keys unencrypted`);
+    }
   }
-  if (!settings.secrets.allowPlaintext && !env.KMS_ROLE_ARN) {
-    problems.push(`KMS_ROLE_ARN is not set; ${name} reaches KMS through Vercel OIDC`);
+  if (env.SECRETS_ENCRYPTION_KEY) {
+    const keys = env.SECRETS_ENCRYPTION_KEY.split(",").map((part) => part.trim()).filter(Boolean);
+    if (!keys.length || keys.some((key) => Buffer.from(key, "base64").length !== 32)) {
+      problems.push("SECRETS_ENCRYPTION_KEY must be base64 32-byte key(s), comma-separated (openssl rand -base64 32)");
+    }
+  }
+  if (env.AZURE_KEY_VAULT_KEY_ID && !/^https:\/\/[^/]+\/keys\/[^/]+(\/[^/]+)?$/.test(env.AZURE_KEY_VAULT_KEY_ID)) {
+    problems.push("AZURE_KEY_VAULT_KEY_ID must be a key id like https://<vault>.vault.azure.net/keys/<name>[/<version>]");
   }
   // Locally, demo datasets are optional: without the password they're simply not offered.
   if (name !== "local" && settings.demoData.datasets.length && !env.DEMO_DATABASE_PASSWORD) {

@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { and, asc, eq, gt, isNull, lt, sql } from "drizzle-orm";
+import { z } from "zod";
 
 import type { DemoDataset } from "@/config";
 import type { Database } from "@/lib/db";
@@ -16,7 +17,11 @@ import {
   type ConnectionConfig,
   type ConnectionType,
 } from "@/lib/sources/catalog";
+import { MCP_TOOL_NAME } from "@/lib/sources/mcp/catalog";
 import type { ConnectionSource, ConnectionWarning, OpenConnection } from "@/lib/sources/types";
+import { hasRole } from "@/lib/orgs/roles";
+import { mcpHostAllowed, type OrgSettings } from "@/lib/orgs/settings";
+import type { Scope } from "@/lib/orgs/scope";
 
 import {
   fail,
@@ -87,6 +92,8 @@ export type ConnectionServiceDeps = {
   signInTtlMs?: number;
   /** Demo datasets on offer, and the shared read-only password. No password: none on offer. */
   demo?: { datasets: () => DemoDataset[]; password: () => string | undefined };
+  /** The organisation's policies (MCP host allow-list). Absent: no policy. */
+  orgSettings?: (orgId: string) => Promise<OrgSettings>;
 };
 
 /** How an installed demo dataset reads in lists and pickers. */
@@ -100,6 +107,13 @@ const CREDENTIAL_NAMES: Record<string, string> = {
   apiKey: "API key",
   serviceAccountKey: "service account key",
 };
+
+const mcpAllowedToolsSchema = z
+  .object({
+    id: z.uuid(),
+    allowedTools: z.array(z.string().regex(MCP_TOOL_NAME, "Use tool names exactly as the server lists them.")).max(200).nullable(),
+  })
+  .strict();
 
 const DEFAULT_SIGN_IN_TTL_MS = 10 * 60 * 1000;
 
@@ -116,10 +130,12 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
   const now = deps.now ?? (() => new Date());
   const keyCache = createKeyCache(deps.keyCacheTtlMs ?? DEFAULT_KEY_CACHE_TTL_MS, now);
 
-  const context = (type: ConnectionType, userId: string, connectionId: string): SecretContext => ({
+  /** A connection's secret is bound to who created it, the row and its organisation. */
+  const context = (type: ConnectionType, userId: string, connectionId: string, orgId: string): SecretContext => ({
     purpose: deps.sources(type).credential.purpose,
     userId,
     connectionId,
+    orgId,
   });
 
   /**
@@ -168,26 +184,49 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     return connectionConfigSchema.parse(row.config);
   }
 
-  async function findOwned(userId: string, id: string) {
+  async function findOwned(scope: Scope, id: string) {
     const [row] = await db
       .select()
       .from(dataConnections)
-      .where(and(eq(dataConnections.id, id), eq(dataConnections.userId, userId)))
+      .where(and(eq(dataConnections.id, id), eq(dataConnections.orgId, scope.orgId)))
       .limit(1);
     return row;
   }
 
-  async function appsUsing(userId: string, connectionId: string) {
+  /** Whether this caller may change the row: its creator, or an admin. Viewers change nothing. */
+  function mayChange(scope: Scope, row: { userId: string }): boolean {
+    if (!scope.role) return true;
+    if (scope.role === "viewer") return false;
+    return hasRole(scope.role, "admin") || row.userId === scope.userId;
+  }
+
+  /** The organisation's MCP host allow-list, checked when an MCP server is added or signed in to. */
+  async function mcpPolicyRefusal(scope: Scope, config: { type: string; url?: unknown }): Promise<Result<never> | null> {
+    if (config.type !== "mcp" || typeof config.url !== "string" || !deps.orgSettings) return null;
+    const settings = await deps.orgSettings(scope.orgId);
+    if (mcpHostAllowed(settings, new URL(config.url).hostname)) return null;
+    return fail({ code: "policy_blocked", field: "url", message: "Your organisation's admins haven't allowed MCP servers on this host." });
+  }
+
+  const forbidden = (): Result<never> =>
+    fail({ code: "forbidden", message: "Only the person who added this connection, or an admin, can change it." });
+
+  async function appsUsing(scope: Scope, connectionId: string) {
     return db
       .select({ id: apps.id, name: apps.name })
       .from(appConnections)
       .innerJoin(apps, eq(apps.id, appConnections.appId))
-      .where(and(eq(appConnections.connectionId, connectionId), eq(apps.userId, userId)))
+      .where(and(eq(appConnections.connectionId, connectionId), eq(apps.orgId, scope.orgId)))
       .orderBy(asc(apps.name));
   }
 
   /** Pending sign-ins are sealed for their user and their own (hashed) state. */
-  const signInContext = (userId: string, stateHash: string): SecretContext => ({ purpose: "mcp-oauth-sign-in", userId, connectionId: stateHash });
+  const signInContext = (scope: Scope, stateHash: string): SecretContext => ({
+    purpose: "mcp-oauth-sign-in",
+    userId: scope.userId,
+    connectionId: stateHash,
+    orgId: scope.orgId,
+  });
 
   /**
    * Changes a connection's stored credential (new OAuth tokens, say), one
@@ -197,21 +236,21 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
    * dashboard queries can't both refresh and spend a rotating refresh token twice.
    */
   async function updateCredential(
-    userId: string,
+    scope: Scope,
     connectionId: string,
     type: ConnectionType,
     change: (current: string) => Promise<{ credential: string; status?: "ok" | "invalid" }>,
   ): Promise<string> {
-    const ctx = context(type, userId, connectionId);
     try {
       return await db.transaction(async (tx) => {
         await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${connectionId}, 0))`);
         const [row] = await tx
           .select()
           .from(dataConnections)
-          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.userId, userId)))
+          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.orgId, scope.orgId)))
           .limit(1);
         if (!row) throw new Error("Connection disappeared while its credential was being updated");
+        const ctx = context(type, row.userId, connectionId, scope.orgId);
         const current = await openCredential(row.secret, ctx);
         const next = await change(current);
         if (next.credential === current && !next.status) return current;
@@ -226,7 +265,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
             lastCheckedAt: now(),
             updatedAt: now(),
           })
-          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.userId, userId)));
+          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.orgId, scope.orgId)));
         return next.credential;
       });
     } finally {
@@ -263,7 +302,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
   }
 
   /** Deletes a connection, or uninstalls a demo dataset, if no app uses it. */
-  async function removeRow(userId: string, row: DataConnectionRow): Promise<Result<undefined>> {
+  async function removeRow(scope: Scope, row: DataConnectionRow): Promise<Result<undefined>> {
     const inUse = (users: { id: string; name: string }[]) =>
       fail({
         code: "in_use",
@@ -274,14 +313,14 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         apps: users,
       });
 
-    const users = await appsUsing(userId, row.id);
+    const users = await appsUsing(scope, row.id);
     if (users.length) return inUse(users);
 
     try {
-      await db.delete(dataConnections).where(and(eq(dataConnections.id, row.id), eq(dataConnections.userId, userId)));
+      await db.delete(dataConnections).where(and(eq(dataConnections.id, row.id), eq(dataConnections.orgId, scope.orgId)));
     } catch (error) {
       // An app was added between the check and the delete: the foreign key caught it.
-      if (isForeignKeyViolation(error)) return inUse(await appsUsing(userId, row.id));
+      if (isForeignKeyViolation(error)) return inUse(await appsUsing(scope, row.id));
       throw error;
     }
     keyCache.delete(row.id);
@@ -289,7 +328,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
   }
 
   const service = {
-    async list(userId: string): Promise<ConnectionSummary[]> {
+    async list(scope: Scope): Promise<ConnectionSummary[]> {
       const rows = await db
         .select({
           id: dataConnections.id,
@@ -302,14 +341,14 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
           demoDataset: dataConnections.demoDataset,
         })
         .from(dataConnections)
-        .where(eq(dataConnections.userId, userId))
+        .where(eq(dataConnections.orgId, scope.orgId))
         .orderBy(asc(dataConnections.createdAt));
 
       const appRows = await db
         .select({ id: apps.id, name: apps.name, connectionId: appConnections.connectionId })
         .from(appConnections)
         .innerJoin(apps, eq(apps.id, appConnections.appId))
-        .where(eq(apps.userId, userId))
+        .where(eq(apps.orgId, scope.orgId))
         .orderBy(asc(apps.name));
 
       const summaries: ConnectionSummary[] = [];
@@ -336,10 +375,10 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     },
 
     /** Every demo dataset on offer, and whether this user has it installed. */
-    async listDemoDatasets(userId: string): Promise<DemoDatasetSummary[]> {
+    async listDemoDatasets(scope: Scope): Promise<DemoDatasetSummary[]> {
       const datasets = demoDatasets();
       if (!datasets.length) return [];
-      const installed = (await service.list(userId)).filter((connection) => connection.demo);
+      const installed = (await service.list(scope)).filter((connection) => connection.demo);
       return datasets.map((dataset) => {
         const connection = installed.find((candidate) => candidate.demo?.key === dataset.key);
         return {
@@ -358,8 +397,9 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * Installs a demo dataset for the user: a connection of theirs that
      * points at it. Installing one that's already installed returns it.
      */
-    installDemo(userId: string, input: unknown): Promise<Result<{ id: string }>> {
+    installDemo(scope: Scope, input: unknown): Promise<Result<{ id: string }>> {
       return guard("installDemo", async () => {
+        if (scope.role === "viewer") return forbidden();
         const parsed = demoRefSchema.safeParse(input);
         const dataset = parsed.success ? demoDatasetFor(parsed.data.dataset) : undefined;
         if (!dataset) return fail({ code: "not_found", message: "This demo dataset isn't available." });
@@ -368,7 +408,8 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
           .insert(dataConnections)
           .values({
             id: randomUUID(),
-            userId,
+            userId: scope.userId,
+            orgId: scope.orgId,
             name: dataset.name,
             type: "postgres",
             config: { type: "postgres", ...dataset.postgres },
@@ -382,29 +423,31 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         const [row] = await db
           .select({ id: dataConnections.id })
           .from(dataConnections)
-          .where(and(eq(dataConnections.userId, userId), eq(dataConnections.demoDataset, dataset.key)))
+          .where(and(eq(dataConnections.orgId, scope.orgId), eq(dataConnections.demoDataset, dataset.key)))
           .limit(1);
         return row ? ok({ id: row.id }) : internalError();
       });
     },
 
     /** Uninstalls a demo dataset no app uses. Uninstalling one that isn't installed succeeds. */
-    uninstallDemo(userId: string, input: unknown): Promise<Result<undefined>> {
+    uninstallDemo(scope: Scope, input: unknown): Promise<Result<undefined>> {
       return guard("uninstallDemo", async () => {
         const parsed = demoRefSchema.safeParse(input);
         if (!parsed.success) return fail({ code: "not_found", message: "This demo dataset isn't available." });
         const [row] = await db
           .select()
           .from(dataConnections)
-          .where(and(eq(dataConnections.userId, userId), eq(dataConnections.demoDataset, parsed.data.dataset)))
+          .where(and(eq(dataConnections.orgId, scope.orgId), eq(dataConnections.demoDataset, parsed.data.dataset)))
           .limit(1);
-        return row ? removeRow(userId, row) : ok(undefined);
+        if (row && !mayChange(scope, row)) return forbidden();
+        return row ? removeRow(scope, row) : ok(undefined);
       });
     },
 
     /** Tests the credential against the source and saves the connection only if it works. */
-    create(userId: string, input: unknown): Promise<Result<{ id: string; warnings: ConnectionWarning[] }>> {
+    create(scope: Scope, input: unknown): Promise<Result<{ id: string; warnings: ConnectionWarning[] }>> {
       return guard("create", async () => {
+        if (scope.role === "viewer") return forbidden();
         const envelope = createEnvelopeSchema.safeParse(input);
         if (!envelope.success) return fromValidation(envelope.error);
         const type = envelope.data.type as ConnectionType;
@@ -422,15 +465,18 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         if (tooLarge) return tooLarge;
 
         const config = { type, ...settings.data } as ConnectionConfig;
+        const refused = await mcpPolicyRefusal(scope, config);
+        if (refused) return refused;
         const id = randomUUID();
         let warnings: ConnectionWarning[];
         try {
           // Sealed first: no point testing a credential we can't store.
-          const secret = await sealCredential(credential.data, context(type, userId, id));
+          const secret = await sealCredential(credential.data, context(type, scope.userId, id, scope.orgId));
           warnings = await check(config, credential.data);
           await db.insert(dataConnections).values({
             id,
-            userId,
+            userId: scope.userId,
+            orgId: scope.orgId,
             name,
             type,
             config,
@@ -447,19 +493,20 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     },
 
     /** Checks a saved connection again and records the outcome. */
-    retest(userId: string, input: unknown): Promise<Result<{ status: ConnectionStatus }>> {
+    retest(scope: Scope, input: unknown): Promise<Result<{ status: ConnectionStatus }>> {
       return guard("retest", async () => {
         const parsed = connectionRefSchema.safeParse(input);
         if (!parsed.success) return notFound();
-        const row = await findOwned(userId, parsed.data.id);
+        const row = await findOwned(scope, parsed.data.id);
         if (!row) return notFound();
+        if (!mayChange(scope, row)) return forbidden();
         if (row.demoDataset !== null) return demoReadOnly();
 
         let failure: { error: ConnectionError; status: Exclude<ConnectionStatus, "ok"> } | null = null;
         try {
           const config = configOf(row);
           const credential = await keyCache.get(row.id, () =>
-            openCredential(row.secret, context(config.type, userId, row.id)),
+            openCredential(row.secret, context(config.type, row.userId, row.id, scope.orgId)),
           );
           const { type, ...settings } = config;
           const source = deps.sources(type);
@@ -469,7 +516,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
               name: row.name,
               config: settings,
               credential,
-              updateCredential: (change) => updateCredential(userId, row.id, type, change),
+              updateCredential: (change) => updateCredential(scope, row.id, type, change),
             });
           } else {
             await check(config, credential);
@@ -484,21 +531,22 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         await db
           .update(dataConnections)
           .set({ status, lastCheckedAt: now(), updatedAt: now() })
-          .where(and(eq(dataConnections.id, row.id), eq(dataConnections.userId, userId)));
+          .where(and(eq(dataConnections.id, row.id), eq(dataConnections.orgId, scope.orgId)));
 
         return failure ? fail(failure.error) : ok({ status });
       });
     },
 
     /** Swaps the API key or password. Where the connection points stays fixed. */
-    replaceCredential(userId: string, input: unknown): Promise<Result<{ warnings: ConnectionWarning[] }>> {
+    replaceCredential(scope: Scope, input: unknown): Promise<Result<{ warnings: ConnectionWarning[] }>> {
       return guard("replaceCredential", async () => {
         const parsed = replaceCredentialSchema.safeParse(input);
         if (!parsed.success) {
           return parsed.error.issues[0]?.path[0] === "id" ? notFound() : fromValidation(parsed.error);
         }
-        const row = await findOwned(userId, parsed.data.id);
+        const row = await findOwned(scope, parsed.data.id);
         if (!row) return notFound();
+        if (!mayChange(scope, row)) return forbidden();
         if (row.demoDataset !== null) return demoReadOnly();
 
         const config = configOf(row);
@@ -510,7 +558,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
 
         let warnings: ConnectionWarning[];
         try {
-          const secret = await sealCredential(credential.data, context(config.type, userId, row.id));
+          const secret = await sealCredential(credential.data, context(config.type, row.userId, row.id, scope.orgId));
           warnings = await check(config, credential.data);
           await db
             .update(dataConnections)
@@ -521,7 +569,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
               lastCheckedAt: now(),
               updatedAt: now(),
             })
-            .where(and(eq(dataConnections.id, row.id), eq(dataConnections.userId, userId)));
+            .where(and(eq(dataConnections.id, row.id), eq(dataConnections.orgId, scope.orgId)));
         } catch (error) {
           return checkFailure(error, config.type);
         } finally {
@@ -531,17 +579,20 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
       });
     },
 
-    rename(userId: string, input: unknown): Promise<Result<undefined>> {
+    rename(scope: Scope, input: unknown): Promise<Result<undefined>> {
       return guard("rename", async () => {
         const parsed = renameSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
+        const row = await findOwned(scope, parsed.data.id);
+        if (!row) return notFound();
+        if (!mayChange(scope, row)) return forbidden();
         const updated = await db
           .update(dataConnections)
           .set({ name: parsed.data.name, updatedAt: now() })
           .where(
             and(
               eq(dataConnections.id, parsed.data.id),
-              eq(dataConnections.userId, userId),
+              eq(dataConnections.orgId, scope.orgId),
               isNull(dataConnections.demoDataset),
             ),
           )
@@ -551,13 +602,44 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     },
 
     /** Deletes a connection no app uses. */
-    remove(userId: string, input: unknown): Promise<Result<undefined>> {
+    remove(scope: Scope, input: unknown): Promise<Result<undefined>> {
       return guard("remove", async () => {
         const parsed = connectionRefSchema.safeParse(input);
         if (!parsed.success) return notFound();
-        const row = await findOwned(userId, parsed.data.id);
+        const row = await findOwned(scope, parsed.data.id);
         if (!row) return notFound();
-        return removeRow(userId, row);
+        if (!mayChange(scope, row)) return forbidden();
+        return removeRow(scope, row);
+      });
+    },
+
+    /** The organisation's MCP servers and the tools each may use, for admins' policy page. */
+    async mcpPolicies(scope: Scope): Promise<{ id: string; name: string; host: string; allowedTools: string[] | null }[]> {
+      const rows = await db
+        .select({ id: dataConnections.id, name: dataConnections.name, config: dataConnections.config })
+        .from(dataConnections)
+        .where(and(eq(dataConnections.orgId, scope.orgId), eq(dataConnections.type, "mcp")))
+        .orderBy(asc(dataConnections.name));
+      return rows.map((row) => {
+        const config = configOf(row) as Extract<ConnectionConfig, { type: "mcp" }>;
+        return { id: row.id, name: row.name, host: new URL(config.url).host, allowedTools: config.allowedTools ?? null };
+      });
+    },
+
+    /** Sets which of an MCP server's tools may be used (null: all read-only ones). Admins only. */
+    setMcpAllowedTools(scope: Scope, input: unknown): Promise<Result<undefined>> {
+      return guard("setMcpAllowedTools", async () => {
+        if (scope.role && !hasRole(scope.role, "admin")) return fail({ code: "forbidden", message: "Only admins can change which tools a server may use." });
+        const parsed = mcpAllowedToolsSchema.safeParse(input);
+        if (!parsed.success) return fromValidation(parsed.error);
+        const row = await findOwned(scope, parsed.data.id);
+        if (!row || row.type !== "mcp") return notFound();
+        const config = { ...(configOf(row) as Extract<ConnectionConfig, { type: "mcp" }>), allowedTools: parsed.data.allowedTools };
+        await db
+          .update(dataConnections)
+          .set({ config, updatedAt: now() })
+          .where(and(eq(dataConnections.id, row.id), eq(dataConnections.orgId, scope.orgId)));
+        return ok(undefined);
       });
     },
 
@@ -566,9 +648,9 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * only if it belongs to `userId` and is of `type`. Server code only; the
      * credential never leaves the server.
      */
-    async open(userId: string, connectionId: string, type: ConnectionType): Promise<OpenConnection<Record<string, unknown>> | null> {
+    async open(scope: Scope, connectionId: string, type: ConnectionType): Promise<OpenConnection<Record<string, unknown>> | null> {
       if (!connectionIdSchema(connectionId)) return null;
-      const row = await findOwned(userId, connectionId);
+      const row = await findOwned(scope, connectionId);
       if (!row || row.type !== type) return null;
       if (row.demoDataset !== null) {
         // Where it points and the shared read-only password come from config, never the row.
@@ -578,13 +660,13 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         return { id: row.id, name: row.name, config: { ...dataset.postgres }, credential: password };
       }
       const { type: _type, ...settings } = configOf(row);
-      const credential = await keyCache.get(row.id, () => openCredential(row.secret, context(type, userId, row.id)));
+      const credential = await keyCache.get(row.id, () => openCredential(row.secret, context(type, row.userId, row.id, scope.orgId)));
       return {
         id: row.id,
         name: row.name,
         config: settings,
         credential,
-        updateCredential: (change) => updateCredential(userId, row.id, type, change),
+        updateCredential: (change) => updateCredential(scope, row.id, type, change),
       };
     },
 
@@ -594,19 +676,27 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * and client registration. Found later by the state's hash only.
      */
     startSignIn(
-      userId: string,
+      scope: Scope,
       sign: { stateHash: string; connectionId: string | null; name: string; config: ConnectionConfig; pending: string },
     ): Promise<Result<undefined>> {
       return guard("startSignIn", async () => {
-        if (sign.connectionId && !(await findOwned(userId, sign.connectionId))) return notFound();
+        if (scope.role === "viewer") return forbidden();
+        if (sign.connectionId) {
+          const row = await findOwned(scope, sign.connectionId);
+          if (!row) return notFound();
+          if (!mayChange(scope, row)) return forbidden();
+        }
+        const refused = await mcpPolicyRefusal(scope, sign.config);
+        if (refused) return refused;
         const tooLarge = refuseIfTooLarge(sign.config.type, sign.pending, "create");
         if (tooLarge) return tooLarge;
         // Old, abandoned sign-ins go first.
         await db.delete(mcpOAuthSignIns).where(lt(mcpOAuthSignIns.expiresAt, now()));
-        const secret = await deps.secrets().seal(sign.pending, signInContext(userId, sign.stateHash));
+        const secret = await deps.secrets().seal(sign.pending, signInContext(scope, sign.stateHash));
         await db.insert(mcpOAuthSignIns).values({
           stateHash: sign.stateHash,
-          userId,
+          userId: scope.userId,
+          orgId: scope.orgId,
           connectionId: sign.connectionId,
           name: sign.name,
           config: sign.config,
@@ -624,14 +714,14 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
     async takeSignIn(
       userId: string,
       stateHash: string,
-    ): Promise<{ connectionId: string | null; name: string; config: ConnectionConfig; pending: string } | null> {
+    ): Promise<{ orgId: string; connectionId: string | null; name: string; config: ConnectionConfig; pending: string } | null> {
       const [row] = await db
         .delete(mcpOAuthSignIns)
         .where(and(eq(mcpOAuthSignIns.stateHash, stateHash), eq(mcpOAuthSignIns.userId, userId), gt(mcpOAuthSignIns.expiresAt, now())))
         .returning();
       if (!row) return null;
-      const pending = await deps.secrets().open(row.secret, signInContext(userId, stateHash));
-      return { connectionId: row.connectionId, name: row.name, config: connectionConfigSchema.parse(row.config), pending };
+      const pending = await deps.secrets().open(row.secret, signInContext({ orgId: row.orgId, userId }, stateHash));
+      return { orgId: row.orgId, connectionId: row.connectionId, name: row.name, config: connectionConfigSchema.parse(row.config), pending };
     },
 
     /**
@@ -639,7 +729,7 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
      * works: a new one, or new tokens for an existing one of this user's.
      */
     saveSignedIn(
-      userId: string,
+      scope: Scope,
       input: { connectionId: string | null; name: string; config: ConnectionConfig; credential: string },
     ): Promise<Result<{ id: string; warnings: ConnectionWarning[] }>> {
       return guard("saveSignedIn", async () => {
@@ -647,17 +737,20 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
         const source = deps.sources(config.type);
         const tooLarge = refuseIfTooLarge(config.type, input.credential, input.connectionId ? "replace" : "create");
         if (tooLarge) return tooLarge;
+        const refused = await mcpPolicyRefusal(scope, config);
+        if (refused) return refused;
 
         if (input.connectionId) {
-          const row = await findOwned(userId, input.connectionId);
+          const row = await findOwned(scope, input.connectionId);
           if (!row || row.type !== config.type || row.demoDataset !== null) return notFound();
+          if (!mayChange(scope, row)) return forbidden();
           try {
-            const secret = await sealCredential(input.credential, context(config.type, userId, row.id));
+            const secret = await sealCredential(input.credential, context(config.type, row.userId, row.id, scope.orgId));
             const warnings = await check(config, input.credential);
             await db
               .update(dataConnections)
               .set({ config, secret, credentialHint: source.credential.hint(input.credential), status: "ok", lastCheckedAt: now(), updatedAt: now() })
-              .where(and(eq(dataConnections.id, row.id), eq(dataConnections.userId, userId)));
+              .where(and(eq(dataConnections.id, row.id), eq(dataConnections.orgId, scope.orgId)));
             return ok({ id: row.id, warnings });
           } catch (error) {
             return checkFailure(error, config.type);
@@ -668,11 +761,12 @@ export function createConnectionService(deps: ConnectionServiceDeps) {
 
         const id = randomUUID();
         try {
-          const secret = await sealCredential(input.credential, context(config.type, userId, id));
+          const secret = await sealCredential(input.credential, context(config.type, scope.userId, id, scope.orgId));
           const warnings = await check(config, input.credential);
           await db.insert(dataConnections).values({
             id,
-            userId,
+            userId: scope.userId,
+            orgId: scope.orgId,
             name: input.name,
             type: config.type,
             config,

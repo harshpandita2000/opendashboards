@@ -37,7 +37,10 @@ export function SourceFormDialog(props: Props) {
   const { type, open, onOpenChange, secretMode, service } = props;
   const replacing = props.mode === "replace";
   const spec = service && type === "mcp" && !replacing ? mcpPresetForm(MCP_SERVICES[service]) : SOURCE_FORMS[type];
-  const allFields = replacing ? [spec.credential] : [...spec.fields, spec.credential];
+  const extra = spec.credentialExtra;
+  const allFields = replacing
+    ? [spec.credential, ...(extra ? [extra.field] : [])]
+    : [...spec.fields, spec.credential, ...(extra ? [extra.field] : [])];
   // MCP servers: sign in with OAuth (the server's own page), or an API key, as the server allows.
   const authOptions: readonly McpAuth[] = spec.oauth && !replacing ? spec.oauth.options : ["key"];
   const [auth, setAuth] = useState<McpAuth>(authOptions[0]);
@@ -121,11 +124,16 @@ export function SourceFormDialog(props: Props) {
     if (!signingIn) {
       const credential = spec.schemas.credential.safeParse(values[spec.credential.name] ?? "");
       if (!credential.success) errors[spec.credential.name] ??= credential.error.issues[0]?.message ?? "Check this field.";
+      if (extra) {
+        const combined = extra.combine(values[spec.credential.name] ?? "", values[extra.field.name] ?? "");
+        if (!combined.ok) errors[extra.field.name] ??= combined.message;
+      }
     }
     if (replacing) return errors;
     const name = connectionNameSchema.safeParse(values.name ?? "");
     if (!name.success) errors.name ??= name.error.issues[0]?.message ?? "Enter a name.";
-    const { name: _name, [spec.credential.name]: _credential, ...settings } = values;
+    const { name: _name, [spec.credential.name]: _credential, ...rest } = values;
+    const settings = extra ? Object.fromEntries(Object.entries(rest).filter(([key]) => key !== extra.field.name)) : rest;
     // A known MCP server's endpoint comes from its preset, as it does on the server.
     const config = spec.schemas.config.safeParse(service ? { ...settings, service } : settings);
     if (!config.success) {
@@ -145,11 +153,19 @@ export function SourceFormDialog(props: Props) {
       return setFieldErrors(errors);
     }
     if (signingIn) return signIn();
+    // Extra secret input (MCP headers) travels packed into the one credential, never as a setting.
+    const packed = extra ? extra.combine(values[spec.credential.name] ?? "", values[extra.field.name] ?? "") : null;
+    const credentialValue = packed?.ok ? packed.credential : (values[spec.credential.name] ?? "");
+    const { [extra?.field.name ?? "\u0000"]: _extra, ...sent } = values;
     startTransition(async () => {
       const result =
         props.mode === "replace"
-          ? await replaceCredentialAction({ id: props.connection.id, credential: values[spec.credential.name] ?? "" })
-          : await createConnectionAction(service ? { type, name: values.name ?? "", apiKey: values.apiKey ?? "", service } : { type, ...values });
+          ? await replaceCredentialAction({ id: props.connection.id, credential: credentialValue })
+          : await createConnectionAction(
+              service
+                ? { type, name: values.name ?? "", apiKey: credentialValue, service }
+                : { type, ...sent, [spec.credential.name]: credentialValue },
+            );
 
       if (result.ok) {
         toast.success(replacing ? "Saved" : `Connected to ${(values.name ?? "").trim()}`);

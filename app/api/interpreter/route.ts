@@ -4,7 +4,10 @@ import { z } from "zod";
 import { track } from "@/lib/analytics";
 import { getDashboardService, getDashboards } from "@/lib/dashboards";
 import { SIGN_IN_LOST_HEADER } from "@/lib/dashboards/sign-in-lost";
-import { HttpError, readJson, route } from "@/lib/http";
+import { HttpError, readJson } from "@/lib/http";
+import { viewerMayRun } from "@/lib/dashboards/viewer-guard";
+import { hasRole } from "@/lib/orgs/roles";
+import { orgRoute } from "@/lib/orgs/route";
 import { addLogContext, logError } from "@/lib/log";
 
 const requestSchema = z.object({
@@ -21,23 +24,39 @@ const TIMEOUT_MS = 120_000;
 export const maxDuration = 150;
 
 /**
- * Runs a live dashboard's data calls. The dashboard must be this user's, and
- * the app its tools record usage against comes from OpenDashboards' own record of
- * the dashboard, never from the request.
+ * Runs a live dashboard's data calls. The dashboard must be in the user's
+ * current organisation, and the app its tools record usage against comes
+ * from OpenDashboards' own record of the dashboard, never from the request.
+ * A viewer's call runs only if the dashboard's own program makes it.
  */
-export const POST = route(async (request, user) => {
+export const POST = orgRoute("viewer", async (request, { user, role, scope }) => {
   const parsed = requestSchema.safeParse(await readJson(request));
   if (!parsed.success) throw new HttpError(400, "Invalid interpreter request");
 
-  const dashboard = await getDashboardService().findByArtifact(user.id, parsed.data.id);
+  const dashboard = await getDashboardService().findByArtifact(scope, parsed.data.id);
   if (!dashboard) throw new HttpError(404, "Dashboard not found");
   addLogContext({ app: dashboard.appId, dashboard: parsed.data.id });
+  if (!hasRole(role, "member")) {
+    const allowed = await viewerMayRun(scope, { appId: dashboard.appId, artifactId: parsed.data.id, version: parsed.data.version }, parsed.data);
+    if (!allowed) {
+      return Response.json(
+        { error: { code: "viewer_not_allowed", message: "Viewers can run only the queries this dashboard was built with." } },
+        { status: 403 },
+      );
+    }
+  }
 
   // A data call that finds a sign-in expired says so in a header, even when the
   // dashboard's script caught the error: the page then refreshes to show "Sign in again".
   let signInLost = false;
   const headers = (): HeadersInit => (signInLost ? { [SIGN_IN_LOST_HEADER]: "1" } : {});
-  const context = { userId: user.id, appId: dashboard.appId, onSignInLost: () => (signInLost = true) };
+  const context = {
+    userId: scope.cloudUserId,
+    orgId: scope.orgId,
+    actorUserId: user.id,
+    appId: dashboard.appId,
+    onSignInLost: () => (signInLost = true),
+  };
 
   try {
     const result = await getDashboards().interpreter.execute(parsed.data, context, { signal: request.signal, timeoutMs: TIMEOUT_MS });

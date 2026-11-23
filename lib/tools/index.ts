@@ -6,6 +6,9 @@ import { getAppService } from "@/lib/apps";
 import { fromCheckError } from "@/lib/connections/errors";
 import { getConnectionService } from "@/lib/connections";
 import { logError, withLogContext } from "@/lib/log";
+import { getOrgService } from "@/lib/orgs";
+import { mcpHostAllowed } from "@/lib/orgs/settings";
+import type { Scope } from "@/lib/orgs/scope";
 import { ALL_SOURCES } from "@/lib/sources";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import type { ConnectionSource, SourceTool, ToolCaller } from "@/lib/sources/types";
@@ -16,15 +19,22 @@ import type { ConnectionSource, SourceTool, ToolCaller } from "@/lib/sources/typ
  * Sources write tools as "given an open connection, do X". This runner does
  * the rest, the same way for every source and every caller:
  *   1. validates the arguments against the tool's schema;
- *   2. takes the user and app from the server-side context, never from arguments;
- *   3. opens the `connection` id only if it's this user's, of the tool's type;
+ *   2. takes the organisation, user and app from the server-side context, never from arguments;
+ *   3. opens the `connection` id only if it's this organisation's, of the tool's type;
  *   4. runs the tool, and on success records that the app uses the connection
  *      (`app_connections`: connections are inferred from use).
  */
 
-/** Who a call is for. Comes from the session and the route, never from the model. */
+/**
+ * Who a call is for. Comes from the session, the organisation membership and
+ * the route, never from the model. `userId` is the organisation's OpenUI
+ * Cloud identity (OpenUI's server SDK requires it under that name, and stores
+ * dashboards for it); `actorUserId` is the signed-in member.
+ */
 export type ToolContext = {
   userId: string;
+  orgId: string;
+  actorUserId: string;
   appId: string;
   /** Called when a call finds a sign-in expired or revoked (its connection is now marked so). */
   onSignInLost?: () => void;
@@ -53,6 +63,9 @@ export class ToolError extends Error {
   }
 }
 
+/** The data scope a tool call runs in. */
+export const scopeOf = (context: ToolContext): Scope => ({ orgId: context.orgId, userId: context.actorUserId });
+
 const connectionArg = z
   .string()
   .describe("The connection's id, from list_connections.");
@@ -74,8 +87,16 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
       }
       const { connection: connectionId, ...toolArgs } = parsed.data;
 
-      const connection = await getConnectionService().open(context.userId, connectionId, source.type as ConnectionType);
+      const connection = await getConnectionService().open(scopeOf(context), connectionId, source.type as ConnectionType);
       if (!connection) throw new ToolError("connection_not_found", `No ${source.label} connection with id ${connectionId}.`);
+      // An organisation can narrow which MCP hosts may be used after a server was added.
+      if (source.type === "mcp") {
+        const url = (connection.config as { url?: unknown }).url;
+        const settings = await getOrgService().settings(context.orgId);
+        if (typeof url !== "string" || !mcpHostAllowed(settings, new URL(url).hostname)) {
+          throw new ToolError("policy_blocked", "Your organisation's admins no longer allow this MCP server's host.");
+        }
+      }
 
       // Tool calls in one turn run concurrently, so each gets its own copy of the context.
       const result = await withLogContext({ connection: connection.id }, async () => {
@@ -95,7 +116,7 @@ function fromSource(source: ConnectionSource, tool: SourceTool<Record<string, un
       });
 
       // Inferred from use. A failure to record shouldn't fail the query.
-      const recorded = await getAppService().recordConnectionUse(context.userId, context.appId, connection.id);
+      const recorded = await getAppService().recordConnectionUse(scopeOf(context), context.appId, connection.id);
       if (!recorded.ok && recorded.error.code !== "not_found") logError("tools.recordConnectionUse", recorded.error);
       return result;
     },
@@ -111,7 +132,7 @@ const listConnections: Tool = {
   parameters: z.toJSONSchema(z.object({})),
   callers: ["agent"],
   async run(_args, context) {
-    const connections = await getConnectionService().list(context.userId);
+    const connections = await getConnectionService().list(scopeOf(context));
     return connections.map(({ id, name, type, source, detail, status, demo }) => ({
       id,
       name,

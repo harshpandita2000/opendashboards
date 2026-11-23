@@ -147,13 +147,14 @@ export function AppWorkspace({
   name: string;
   badges: React.ReactNode;
   menu: React.ReactNode;
-  builder: React.ReactNode;
+  /** The Build chat; absent for viewers, who only look at dashboards. */
+  builder?: React.ReactNode;
   dashboards: Dashboard[];
   /** Shown above the dashboard: a source that needs signing in again, say. */
   notice?: React.ReactNode;
   children: React.ReactNode;
 }) {
-  const [open, setOpenState] = useState(dashboards.length === 0);
+  const [open, setOpenState] = useState(Boolean(builder) && dashboards.length === 0);
   // Opening unmounts the header's Build button and closing hides the panel, so
   // whichever had focus is gone: hand focus to the other side. Only when someone
   // toggles it, not when the workspace first shows.
@@ -211,7 +212,7 @@ export function AppWorkspace({
             <div className="ml-1 hidden min-w-0 flex-1 items-center gap-1.5 overflow-hidden sm:flex">{badges}</div>
             <div className="ml-auto flex shrink-0 items-center gap-1">
               {/* One Build control at a time: this opens the panel, and the panel's own header closes it. */}
-              {!open && (
+              {!open && builder && (
                 <Button
                   ref={openButtonRef}
                   variant="outline"
@@ -233,6 +234,7 @@ export function AppWorkspace({
           {showCreating ? <NewDashboard response={creating.response} /> : children}
         </div>
 
+        {builder && (
         <aside
           ref={panelRef}
           id="app-builder"
@@ -265,6 +267,7 @@ export function AppWorkspace({
           </Button>
           {builder}
         </aside>
+        )}
       </div>
     </RenameAppContext>
     </BuildPanelContext>

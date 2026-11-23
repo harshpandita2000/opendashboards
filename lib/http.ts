@@ -7,10 +7,12 @@ import { withLogContext } from "@/lib/log";
 
 const MAX_JSON_BYTES = 16 * 1024;
 
-const STATUS: Record<AppErrorCode, number> = {
+const STATUS: Record<AppErrorCode | "forbidden" | "conflict", number> = {
   validation: 400,
   not_found: 404,
   thread_conflict: 409,
+  forbidden: 403,
+  conflict: 409,
   internal: 500,
 };
 
@@ -60,11 +62,14 @@ export async function readJson(request: Request, { maxBytes = MAX_JSON_BYTES } =
 }
 
 /** Turns a service result into a response: data as JSON, or the error with its status. */
-export function respond<T>(result: AppResult<T>, { emptyOk = false } = {}): Response {
+export function respond<T>(
+  result: AppResult<T> | { ok: true; data: T } | { ok: false; error: { code: string; message: string; field?: string } },
+  { emptyOk = false } = {},
+): Response {
   if (result.ok) {
     return emptyOk ? new Response(null, { status: 204 }) : Response.json(result.data);
   }
-  return Response.json({ error: result.error }, { status: STATUS[result.error.code] });
+  return Response.json({ error: result.error }, { status: STATUS[result.error.code as keyof typeof STATUS] ?? 400 });
 }
 
 function assertSameOrigin(request: Request) {

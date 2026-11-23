@@ -2,6 +2,7 @@ import { and, asc, count, eq, gt, sql } from "drizzle-orm";
 
 import type { Database } from "@/lib/db";
 import { apps, dashboards } from "@/lib/db/schema";
+import type { Scope } from "@/lib/orgs/scope";
 
 /**
  * OpenDashboards' record of dashboards: which app each OpenUI Cloud artifact belongs
@@ -17,21 +18,21 @@ export function createDashboardService({ db }: { db: Database }) {
      * if the app isn't this user's.
      */
     async record(
-      userId: string,
+      scope: Scope,
       appId: string,
       { artifactId, title, description = null }: { artifactId: string; title: string; description?: string | null },
     ): Promise<{ id: string } | null> {
       const [app] = await db
         .select({ id: apps.id })
         .from(apps)
-        .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
+        .where(and(eq(apps.id, appId), eq(apps.orgId, scope.orgId)))
         .limit(1);
       if (!app) return null;
 
       const [existing] = await db
         .select({ id: dashboards.id, appId: dashboards.appId })
         .from(dashboards)
-        .where(and(eq(dashboards.artifactId, artifactId), eq(dashboards.userId, userId)))
+        .where(and(eq(dashboards.artifactId, artifactId), eq(dashboards.orgId, scope.orgId)))
         .limit(1);
       if (existing) {
         if (existing.appId !== appId) return null;
@@ -45,7 +46,7 @@ export function createDashboardService({ db }: { db: Database }) {
         .where(eq(dashboards.appId, appId));
       const [created] = await db
         .insert(dashboards)
-        .values({ appId, userId, artifactId, title, description, position })
+        .values({ appId, userId: scope.userId, orgId: scope.orgId, artifactId, title, description, position })
         .returning({ id: dashboards.id });
       return created;
     },
@@ -54,12 +55,12 @@ export function createDashboardService({ db }: { db: Database }) {
      * Removes the app's record of a dashboard and closes the gap in the
      * sidebar order. Returns false if it isn't this user's dashboard in that app.
      */
-    async remove(userId: string, appId: string, artifactId: string): Promise<boolean> {
+    async remove(scope: Scope, appId: string, artifactId: string): Promise<boolean> {
       return db.transaction(async (tx) => {
         const [removed] = await tx
           .delete(dashboards)
           .where(
-            and(eq(dashboards.artifactId, artifactId), eq(dashboards.appId, appId), eq(dashboards.userId, userId)),
+            and(eq(dashboards.artifactId, artifactId), eq(dashboards.appId, appId), eq(dashboards.orgId, scope.orgId)),
           )
           .returning({ position: dashboards.position });
         if (!removed) return false;
@@ -77,7 +78,7 @@ export function createDashboardService({ db }: { db: Database }) {
      * in that app.
      */
     async update(
-      userId: string,
+      scope: Scope,
       appId: string,
       dashboardId: string,
       changes: { title?: string; description?: string | null },
@@ -85,14 +86,14 @@ export function createDashboardService({ db }: { db: Database }) {
       const renamed = await db
         .update(dashboards)
         .set(changes)
-        .where(and(eq(dashboards.id, dashboardId), eq(dashboards.appId, appId), eq(dashboards.userId, userId)))
+        .where(and(eq(dashboards.id, dashboardId), eq(dashboards.appId, appId), eq(dashboards.orgId, scope.orgId)))
         .returning({ id: dashboards.id });
       return renamed.length > 0;
     },
 
     /** The app's dashboards, in sidebar order, if the app is this user's. */
     async list(
-      userId: string,
+      scope: Scope,
       appId: string,
     ): Promise<{ id: string; artifactId: string; title: string; description: string | null }[]> {
       return db
@@ -103,16 +104,16 @@ export function createDashboardService({ db }: { db: Database }) {
           description: dashboards.description,
         })
         .from(dashboards)
-        .where(and(eq(dashboards.appId, appId), eq(dashboards.userId, userId)))
+        .where(and(eq(dashboards.appId, appId), eq(dashboards.orgId, scope.orgId)))
         .orderBy(asc(dashboards.position));
     },
 
     /** The app a dashboard belongs to, if it's this user's. */
-    async findByArtifact(userId: string, artifactId: string): Promise<{ id: string; appId: string } | null> {
+    async findByArtifact(scope: Scope, artifactId: string): Promise<{ id: string; appId: string } | null> {
       const [row] = await db
         .select({ id: dashboards.id, appId: dashboards.appId })
         .from(dashboards)
-        .where(and(eq(dashboards.artifactId, artifactId), eq(dashboards.userId, userId)))
+        .where(and(eq(dashboards.artifactId, artifactId), eq(dashboards.orgId, scope.orgId)))
         .limit(1);
       return row ?? null;
     },
