@@ -1,6 +1,6 @@
 "use client";
 
-import { DatabaseIcon, SquarePenIcon } from "lucide-react";
+import { DatabaseIcon, SettingsIcon, SquarePenIcon } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Suspense } from "react";
@@ -8,7 +8,7 @@ import { Suspense } from "react";
 import { cn } from "@/lib/utils";
 
 /** Icons by name: Server Components can't pass component functions to this Client Component. */
-const ICONS = { new: SquarePenIcon, connections: DatabaseIcon };
+const ICONS = { new: SquarePenIcon, connections: DatabaseIcon, settings: SettingsIcon };
 
 type Props = {
   href: string;

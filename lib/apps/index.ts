@@ -2,8 +2,8 @@ import "server-only";
 
 import { cache } from "react";
 
-import { requireUser } from "@/lib/auth/user";
 import { getDb } from "@/lib/db";
+import { requireOrg } from "@/lib/orgs/current";
 
 import { createAppService, type AppService } from "./service";
 import { createThreadService, type ThreadService } from "./threads";
@@ -25,10 +25,10 @@ export function getThreadService(): ThreadService {
 }
 
 /**
- * The signed-in user's app, or null. Cached per request, so the app layout
- * and the dashboard page share one lookup.
+ * An app in the user's current organisation, or null. Cached per request, so
+ * the app layout and the dashboard page share one lookup.
  */
 export const getCurrentUserApp = cache(async (appId: string) => {
-  const user = await requireUser();
-  return getAppService().get(user.id, appId);
+  const { scope } = await requireOrg();
+  return getAppService().get(scope, appId);
 });

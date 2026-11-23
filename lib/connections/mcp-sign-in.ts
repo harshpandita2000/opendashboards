@@ -4,6 +4,8 @@ import { z } from "zod";
 
 import { config as appConfig } from "@/config";
 import { logError } from "@/lib/log";
+import { hasRole } from "@/lib/orgs/roles";
+import type { Scope } from "@/lib/orgs/scope";
 import { mcpConfigSchema } from "@/lib/sources/mcp/catalog";
 import { McpError } from "@/lib/sources/mcp/errors";
 import { MCP_SERVICE_KEYS, mcpService, type McpServiceKey } from "@/lib/sources/mcp/services";
@@ -50,10 +52,16 @@ const startSchema = z.union([
 /** What a pending sign-in keeps sealed, besides the settings it will save. */
 type PendingSecret = PendingSignIn & { requireIss: boolean; returnTo?: string };
 
-type Deps = { service?: ConnectionService; testHooks?: OAuthTestHooks; redirectUri?: string };
+type Deps = {
+  service?: ConnectionService;
+  testHooks?: OAuthTestHooks;
+  redirectUri?: string;
+  /** Whether the user may still add connections to the organisation the sign-in was started in. */
+  canWrite?: (userId: string, orgId: string) => Promise<boolean>;
+};
 
 /** Starts a sign-in for a new server, or again for an existing connection. Returns where to send the browser. */
-export async function startMcpSignIn(userId: string, input: unknown, deps: Deps = {}): Promise<Result<{ authorizationUrl: string }>> {
+export async function startMcpSignIn(scope: Scope, input: unknown, deps: Deps = {}): Promise<Result<{ authorizationUrl: string }>> {
   const service = deps.service ?? getConnectionService();
   const parsed = startSchema.safeParse(input);
   if (!parsed.success) return fromValidation(parsed.error);
@@ -65,7 +73,7 @@ export async function startMcpSignIn(userId: string, input: unknown, deps: Deps 
   let preset: McpServiceKey | undefined;
   if ("connectionId" in parsed.data) {
     ({ returnTo } = parsed.data);
-    const existing = await service.open(userId, parsed.data.connectionId, "mcp");
+    const existing = await service.open(scope, parsed.data.connectionId, "mcp");
     if (!existing) return notFound();
     ({ name } = existing);
     ({ url, service: preset } = existing.config as { url: string; service?: McpServiceKey });
@@ -91,7 +99,7 @@ export async function startMcpSignIn(userId: string, input: unknown, deps: Deps 
       requireIss: (discovery.metadata as { authorization_response_iss_parameter_supported?: boolean }).authorization_response_iss_parameter_supported === true,
       returnTo,
     };
-    const saved = await service.startSignIn(userId, {
+    const saved = await service.startSignIn(scope, {
       stateHash: started.stateHash,
       connectionId,
       name,
@@ -120,6 +128,10 @@ export async function finishMcpSignIn(
   if (!taken) {
     return fail({ code: "oauth_expired", message: "This sign-in expired or was already used. Start it again from Data Connections." });
   }
+  // The connection goes to the organisation the sign-in started in, if the user may still add one there.
+  const canWrite = deps.canWrite ?? defaultCanWrite;
+  if (!(await canWrite(userId, taken.orgId))) return notFound();
+  const scope: Scope = { orgId: taken.orgId, userId };
   const serverError = params.get("error");
   if (serverError) {
     const reason = serverError === "access_denied" ? "access was denied" : serverError;
@@ -141,13 +153,19 @@ export async function finishMcpSignIn(
   try {
     const tokens = await exchangeOAuthCode(settings, pending, code, deps.testHooks);
     const credential = writeOAuthCredential({ kind: "oauth", client: pending.client, tokens });
-    const saved = await service.saveSignedIn(userId, { connectionId: taken.connectionId, name: taken.name, config: taken.config, credential });
+    const saved = await service.saveSignedIn(scope, { connectionId: taken.connectionId, name: taken.name, config: taken.config, credential });
     // Checked again on the way out: only our own app paths, ever.
     const back = pending.returnTo && RETURN_PATH.test(pending.returnTo) ? pending.returnTo : null;
     return saved.ok ? ok({ id: saved.data.id, returnTo: back }) : saved;
   } catch (error) {
     return failure("finish", error);
   }
+}
+
+async function defaultCanWrite(userId: string, orgId: string): Promise<boolean> {
+  const { getOrgService } = await import("@/lib/orgs");
+  const role = await getOrgService().roleOf(userId, orgId);
+  return role !== null && hasRole(role, "member");
 }
 
 function failure(step: string, error: unknown): Result<never> {

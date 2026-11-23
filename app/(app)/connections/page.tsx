@@ -12,7 +12,7 @@ import { SourceTile } from "@/components/connections/source-tile";
 import { UsedBy } from "@/components/connections/used-by";
 import { EmptyState, PageHeader, SectionLabel } from "@/components/page-header";
 import { Skeleton } from "@/components/ui/skeleton";
-import { requireUser } from "@/lib/auth/user";
+import { requireOrg } from "@/lib/orgs/current";
 import { getConnectionService, type ConnectionSummary } from "@/lib/connections";
 import type { ConnectionStatus } from "@/lib/db/schema";
 import { getSecretMode } from "@/lib/secrets";
@@ -36,9 +36,9 @@ export default function ConnectionsPage() {
 
 /** Reads the user and their connections, so it streams in behind the boundary. */
 async function ConnectionsContent() {
-  const user = await requireUser();
+  const { scope } = await requireOrg();
   const service = getConnectionService();
-  const [connections, demos] = await Promise.all([service.list(user.id), service.listDemoDatasets(user.id)]);
+  const [connections, demos] = await Promise.all([service.list(scope), service.listDemoDatasets(scope)]);
   const secretMode = getSecretMode();
   // Sample data that isn't added yet: offered on the empty state, or as a catalog tile once there are connections.
   const sample = demos.find((demo) => demo.connectionId === null);

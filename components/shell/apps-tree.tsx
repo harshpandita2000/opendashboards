@@ -1,5 +1,5 @@
 import { getAppService } from "@/lib/apps";
-import { requireUser } from "@/lib/auth/user";
+import { requireOrg } from "@/lib/orgs/current";
 
 import { AppsTreeNav } from "./apps-tree-nav";
 
@@ -9,8 +9,8 @@ import { AppsTreeNav } from "./apps-tree-nav";
  * Reads the request, so it renders behind Suspense.
  */
 export async function AppsTree() {
-  const user = await requireUser();
-  const apps = await getAppService().tree(user.id);
+  const { scope } = await requireOrg();
+  const apps = await getAppService().tree(scope);
 
   if (!apps.length) {
     return <p className="py-1.5 pl-7 text-xs text-muted-foreground">No apps yet</p>;

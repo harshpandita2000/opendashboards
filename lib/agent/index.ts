@@ -15,7 +15,8 @@ import {
 import { track } from "@/lib/analytics";
 import { logError } from "@/lib/log";
 import spec from "@/lib/dashboards/generated/dashboard.spec.json";
-import { ToolError, toolsFor, type ToolContext } from "@/lib/tools";
+import { scopeOf, ToolError, toolsFor, type ToolContext } from "@/lib/tools";
+import type { CloudScope } from "@/lib/orgs/scope";
 
 /**
  * The Build agent: a plain tool loop over OpenUI Gateway. It explores the
@@ -49,6 +50,8 @@ export function getGateway(): OpenAI {
 export type TurnContext = ToolContext & { signal: AbortSignal; dashboards: string[] };
 
 type AgentTool = RunnableToolFunctionWithContext<TurnContext>;
+
+const cloudScopeOf = (turn: ToolContext): CloudScope => ({ ...scopeOf(turn), cloudUserId: turn.userId });
 
 /**
  * Every tool the agent may call this turn. A failure goes back to the model
@@ -95,7 +98,7 @@ const listDashboards = define(
   "The dashboards already in this app: id and title. Pass an id to edit_dashboard to change one.",
   z.toJSONSchema(z.object({})),
   async (_input, turn) =>
-    (await getDashboardService().list(turn.userId, turn.appId)).map(({ artifactId, title }) => ({
+    (await getDashboardService().list(scopeOf(turn), turn.appId)).map(({ artifactId, title }) => ({
       dashboard: artifactId,
       title,
     })),
@@ -127,7 +130,7 @@ const readDashboardTool = define(
   z.toJSONSchema(readArgs),
   async (input, turn) => {
     const args = parseArgs(readArgs, input);
-    const result = await readDashboard(turn.userId, turn.appId, args.dashboard);
+    const result = await readDashboard(cloudScopeOf(turn), turn.appId, args.dashboard);
     if (!result.ok) {
       throw result.reason === "not_found"
         ? new ToolError("dashboard_not_found", `No dashboard ${args.dashboard} in this app.`)
@@ -189,7 +192,7 @@ const editDashboard = define(
   z.toJSONSchema(editArgs),
   async (input, turn) => {
     const args = parseArgs(editArgs, input);
-    const dashboard = await getDashboardService().findByArtifact(turn.userId, args.dashboard);
+    const dashboard = await getDashboardService().findByArtifact(scopeOf(turn), args.dashboard);
     if (!dashboard || dashboard.appId !== turn.appId) {
       throw new ToolError("dashboard_not_found", `No dashboard ${args.dashboard} in this app.`);
     }
@@ -210,7 +213,7 @@ const deleteDashboardTool = define(
   z.toJSONSchema(deleteArgs),
   async (input, turn) => {
     const args = parseArgs(deleteArgs, input);
-    const result = await deleteDashboard(turn.userId, turn.appId, args.dashboard);
+    const result = await deleteDashboard(cloudScopeOf(turn), turn.appId, args.dashboard);
     if (!result.ok) {
       throw result.reason === "not_found"
         ? new ToolError("dashboard_not_found", `No dashboard ${args.dashboard} in this app.`)
@@ -238,10 +241,10 @@ async function remember(
     throw new ToolError("no_artifact", "OpenUI Cloud didn't return a dashboard.");
   }
   if (created) {
-    const recorded = await getDashboardService().record(turn.userId, turn.appId, { artifactId: artifact.id, ...created });
+    const recorded = await getDashboardService().record(scopeOf(turn), turn.appId, { artifactId: artifact.id, ...created });
     if (!recorded) throw new ToolError("not_found", "This app no longer exists.");
   }
-  track(turn.userId, created ? "dashboard_created" : "dashboard_updated", { app_id: turn.appId, dashboard_id: artifact.id });
+  track(turn.actorUserId, created ? "dashboard_created" : "dashboard_updated", { app_id: turn.appId, dashboard_id: artifact.id });
   turn.dashboards.push(artifact.id);
   return response;
 }

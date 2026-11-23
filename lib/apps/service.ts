@@ -10,6 +10,8 @@ import {
 } from "@/lib/db/schema";
 import type { ConnectionType } from "@/lib/sources/catalog";
 import { logError } from "@/lib/log";
+import { hasRole } from "@/lib/orgs/roles";
+import type { Scope } from "@/lib/orgs/scope";
 
 import { fail, fromValidation, internalError, notFound, ok, type AppResult } from "./errors";
 import { addAppConnectionSchema, appIdSchema, appRefSchema, createAppSchema, renameAppSchema } from "./schemas";
@@ -40,14 +42,15 @@ export type AppDetail = {
 
 /**
  * The data access layer for apps. Like connections, every query is scoped to
- * the caller's user id: another user's app looks exactly like a missing one.
+ * the caller's organisation: another organisation's app looks exactly like a
+ * missing one. Who may change what (roles) is checked by the callers.
  */
 export function createAppService({ db, now = () => new Date() }: { db: Database; now?: () => Date }) {
-  async function owns(userId: string, appId: string) {
+  async function owns(scope: Scope, appId: string) {
     const [row] = await db
       .select({ id: apps.id })
       .from(apps)
-      .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
+      .where(and(eq(apps.id, appId), eq(apps.orgId, scope.orgId)))
       .limit(1);
     return Boolean(row);
   }
@@ -80,7 +83,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 
   const service = {
     /** The user's apps, most recently updated first. */
-    async list(userId: string, { limit }: { limit?: number } = {}): Promise<AppSummary[]> {
+    async list(scope: Scope, { limit }: { limit?: number } = {}): Promise<AppSummary[]> {
       const query = db
         .select({
           id: apps.id,
@@ -90,7 +93,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         })
         .from(apps)
         .leftJoin(dashboards, eq(dashboards.appId, apps.id))
-        .where(eq(apps.userId, userId))
+        .where(eq(apps.orgId, scope.orgId))
         .groupBy(apps.id)
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       const rows = limit ? await query.limit(limit) : await query;
@@ -105,18 +108,18 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /** Apps with their dashboards' titles, for the sidebar tree. Newest app first. */
-    async tree(userId: string): Promise<AppTreeNode[]> {
+    async tree(scope: Scope): Promise<AppTreeNode[]> {
       const appRows = await db
         .select({ id: apps.id, name: apps.name })
         .from(apps)
-        .where(eq(apps.userId, userId))
+        .where(eq(apps.orgId, scope.orgId))
         .orderBy(desc(apps.updatedAt), desc(apps.id));
       if (!appRows.length) return [];
 
       const dashboardRows = await db
         .select({ appId: dashboards.appId, id: dashboards.id, title: dashboards.title })
         .from(dashboards)
-        .where(eq(dashboards.userId, userId))
+        .where(eq(dashboards.orgId, scope.orgId))
         .orderBy(asc(dashboards.position), asc(dashboards.createdAt));
 
       return appRows.map((app) => ({
@@ -127,7 +130,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       }));
     },
 
-    async get(userId: string, appId: string): Promise<AppDetail | null> {
+    async get(scope: Scope, appId: string): Promise<AppDetail | null> {
       if (!appIdSchema.safeParse(appId).success) return null;
       const [app] = await db
         .select({
@@ -139,7 +142,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
           updatedAt: apps.updatedAt,
         })
         .from(apps)
-        .where(and(eq(apps.id, appId), eq(apps.userId, userId)))
+        .where(and(eq(apps.id, appId), eq(apps.orgId, scope.orgId)))
         .limit(1);
       if (!app) return null;
 
@@ -160,7 +163,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         ? await db
             .select({ id: dataConnections.id, name: dataConnections.name })
             .from(dataConnections)
-            .where(and(eq(dataConnections.userId, userId), inArray(dataConnections.id, pendingIds)))
+            .where(and(eq(dataConnections.orgId, scope.orgId), inArray(dataConnections.id, pendingIds)))
             .orderBy(asc(dataConnections.name))
         : [];
 
@@ -185,7 +188,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
      * Creates an app from the prompt typed on the home page, with the data
      * sources picked in the composer. Every source must be the user's own.
      */
-    create(userId: string, input: unknown): Promise<AppResult<{ id: string }>> {
+    create(scope: Scope, input: unknown): Promise<AppResult<{ id: string }>> {
       return guard("create", async () => {
         const parsed = createAppSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
@@ -194,7 +197,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         const owned = await db
           .select({ id: dataConnections.id, name: dataConnections.name })
           .from(dataConnections)
-          .where(and(eq(dataConnections.userId, userId), inArray(dataConnections.id, connectionIds)));
+          .where(and(eq(dataConnections.orgId, scope.orgId), inArray(dataConnections.id, connectionIds)));
         if (owned.length !== connectionIds.length) {
           return fail({
             code: "validation",
@@ -205,11 +208,12 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
 
         // Named after its data sources, in the order they were picked; the user renames it.
         const sources = connectionIds.map((id) => owned.find((row) => row.id === id)!.name);
-        const taken = await db.select({ name: apps.name }).from(apps).where(eq(apps.userId, userId));
+        const taken = await db.select({ name: apps.name }).from(apps).where(eq(apps.orgId, scope.orgId));
         const [app] = await db
           .insert(apps)
           .values({
-            userId,
+            userId: scope.userId,
+            orgId: scope.orgId,
             name: appName(sources, taken.map((row) => row.name)),
             pendingPrompt: prompt,
             pendingConnectionIds: connectionIds,
@@ -221,14 +225,14 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
       });
     },
 
-    rename(userId: string, input: unknown): Promise<AppResult> {
+    rename(scope: Scope, input: unknown): Promise<AppResult> {
       return guard("rename", async () => {
         const parsed = renameAppSchema.safeParse(input);
         if (!parsed.success) return fromValidation(parsed.error);
         const updated = await db
           .update(apps)
           .set({ name: parsed.data.name, updatedAt: now() })
-          .where(and(eq(apps.id, parsed.data.id), eq(apps.userId, userId)))
+          .where(and(eq(apps.id, parsed.data.id), eq(apps.orgId, scope.orgId)))
           .returning({ id: apps.id });
         return updated.length ? ok(undefined) : notFound();
       });
@@ -239,16 +243,30 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
      * mappings and connection usage. Deleting the Cloud dashboards and
      * conversations comes with the chat milestone.
      */
-    remove(userId: string, input: unknown): Promise<AppResult> {
+    remove(scope: Scope, input: unknown): Promise<AppResult> {
       return guard("remove", async () => {
         const parsed = appRefSchema.safeParse(input);
         if (!parsed.success) return notFound();
+        if (!(await service.mayRemove(scope, parsed.data.id))) return notFound();
         const deleted = await db
           .delete(apps)
-          .where(and(eq(apps.id, parsed.data.id), eq(apps.userId, userId)))
+          .where(and(eq(apps.id, parsed.data.id), eq(apps.orgId, scope.orgId)))
           .returning({ id: apps.id });
         return deleted.length ? ok(undefined) : notFound();
       });
+    },
+
+    /** Whether the caller may delete the app: an admin, or the member who created it. */
+    async mayRemove(scope: Scope, appId: string): Promise<boolean> {
+      if (!appIdSchema.safeParse(appId).success) return false;
+      if (scope.role === "viewer") return false;
+      const [row] = await db
+        .select({ userId: apps.userId })
+        .from(apps)
+        .where(and(eq(apps.id, appId), eq(apps.orgId, scope.orgId)))
+        .limit(1);
+      if (!row) return false;
+      return !scope.role || hasRole(scope.role, "admin") || row.userId === scope.userId;
     },
 
     /**
@@ -257,7 +275,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
      * For the chat milestone.
      */
     async takePendingPrompt(
-      userId: string,
+      scope: Scope,
       appId: string,
     ): Promise<{ prompt: string; connectionIds: string[] } | null> {
       if (!appIdSchema.safeParse(appId).success) return null;
@@ -268,7 +286,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         UPDATE ${apps} SET pending_prompt = NULL, pending_connection_ids = NULL
         FROM (
           SELECT id, pending_prompt, pending_connection_ids FROM ${apps}
-          WHERE id = ${appId} AND user_id = ${userId}
+          WHERE id = ${appId} AND org_id = ${scope.orgId} AND user_id = ${scope.userId}
           FOR UPDATE
         ) AS previous
         WHERE ${apps.id} = previous.id
@@ -280,10 +298,10 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
     },
 
     /** Adds one of the user's connections to an app, so it shows there and the agent uses it. */
-    addConnection(userId: string, input: unknown): Promise<AppResult> {
+    addConnection(scope: Scope, input: unknown): Promise<AppResult> {
       const parsed = addAppConnectionSchema.safeParse(input);
       if (!parsed.success) return Promise.resolve(notFound());
-      return service.recordConnectionUse(userId, parsed.data.appId, parsed.data.connectionId);
+      return service.recordConnectionUse(scope, parsed.data.appId, parsed.data.connectionId);
     },
 
     /**
@@ -291,7 +309,7 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
      * the user. The server calls it when a dashboard queries a connection;
      * the browser never can. For the chat milestone.
      */
-    recordConnectionUse(userId: string, appId: string, connectionId: string): Promise<AppResult> {
+    recordConnectionUse(scope: Scope, appId: string, connectionId: string): Promise<AppResult> {
       return guard("recordConnectionUse", async () => {
         if (!appIdSchema.safeParse(appId).success || !appIdSchema.safeParse(connectionId).success) {
           return notFound();
@@ -299,9 +317,9 @@ export function createAppService({ db, now = () => new Date() }: { db: Database;
         const [connection] = await db
           .select({ id: dataConnections.id })
           .from(dataConnections)
-          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.userId, userId)))
+          .where(and(eq(dataConnections.id, connectionId), eq(dataConnections.orgId, scope.orgId)))
           .limit(1);
-        if (!connection || !(await owns(userId, appId))) return notFound();
+        if (!connection || !(await owns(scope, appId))) return notFound();
 
         await db.insert(appConnections).values({ appId, connectionId }).onConflictDoNothing();
         return ok(undefined);

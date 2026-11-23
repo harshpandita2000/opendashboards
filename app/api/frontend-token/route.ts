@@ -1,10 +1,11 @@
 import { getOpenUI } from "@/lib/dashboards";
-import { route } from "@/lib/http";
+import { orgRoute } from "@/lib/orgs/route";
 
 /**
- * The signed-in user's OpenUI Cloud frontend token: the browser reads their
- * chat threads and dashboards with it. It reads only this user's artifacts.
+ * The OpenUI Cloud frontend token for the user's current organisation: the
+ * browser reads the organisation's dashboards and chat threads with it. It
+ * reads only that organisation's artifacts.
  */
-export const POST = route(async (_request, user) => {
-  return Response.json(await getOpenUI().createFrontendToken({ userId: user.id }));
+export const POST = orgRoute("viewer", async (_request, { scope }) => {
+  return Response.json(await getOpenUI().createFrontendToken({ userId: scope.cloudUserId }));
 });
