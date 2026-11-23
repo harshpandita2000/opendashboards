@@ -43,8 +43,13 @@ export function UserMenu({
         <DropdownMenuTrigger aria-label={`Account menu for ${email}`} className={className}>
           {children}
         </DropdownMenuTrigger>
-        <DropdownMenuContent side={side} align={align} className="w-auto min-w-52">
-          <DropdownMenuLabel className="truncate font-normal">Signed in as {email}</DropdownMenuLabel>
+        <DropdownMenuContent side={side} align={align} className="min-w-52">
+          <DropdownMenuLabel className="font-normal">
+            Signed in as
+            <span className="block truncate text-foreground" title={email}>
+              {email}
+            </span>
+          </DropdownMenuLabel>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={logOut}>
             <LogOutIcon aria-hidden />
