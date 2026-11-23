@@ -11,6 +11,7 @@ import { mcpSource } from "@/lib/sources/mcp/source";
 import type { ConnectionSource } from "@/lib/sources/types";
 
 import { TEST_DATABASE_URL } from "./global-setup";
+import { asUser, orgsFor } from "./scoped";
 
 /*
  * KMS encrypts at most 4,096 bytes of plaintext. Credentials over that are
@@ -48,14 +49,19 @@ describe("the secret stores", () => {
 
 describe("the connection service", () => {
   const { db, pool } = createDatabase(TEST_DATABASE_URL);
+  const { scopeOf } = orgsFor(db);
   const seal = vi.fn(plaintextSecretBox.seal);
   const secrets: SecretBox = { ...plaintextSecretBox, seal };
   const test = vi.fn(async () => []);
-  const service = createConnectionService({
-    db,
-    secrets: () => secrets,
-    sources: () => ({ ...mcpSource, test }) as unknown as ConnectionSource,
-  });
+  const service = asUser(
+    createConnectionService({
+      db,
+      secrets: () => secrets,
+      sources: () => ({ ...mcpSource, test }) as unknown as ConnectionSource,
+    }),
+    scopeOf,
+    ["takeSignIn"],
+  );
   const input = (apiKey: string) => ({ type: "mcp", name: "Big key", url: "https://mcp.example.com/mcp", headerName: "Authorization", apiKey });
 
   let warn: ReturnType<typeof vi.spyOn>;

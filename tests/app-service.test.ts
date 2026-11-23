@@ -14,16 +14,18 @@ import { posthogSource } from "@/lib/sources/posthog/source";
 import type { ConnectionSource } from "@/lib/sources/types";
 
 import { TEST_DATABASE_URL } from "./global-setup";
+import { asUser, orgsFor } from "./scoped";
 
 const { db, pool } = createDatabase(TEST_DATABASE_URL);
-const appsService = createAppService({ db });
-const threads = createThreadService({ db });
-const connections = createConnectionService({
+const { orgOf, scopeOf } = orgsFor(db);
+const appsService = asUser(createAppService({ db }), scopeOf);
+const threads = asUser(createThreadService({ db }), scopeOf);
+const connections = asUser(createConnectionService({
   db,
   secrets: () => plaintextSecretBox,
   sources: (type) =>
     ({ ...(type === "posthog" ? posthogSource : postgresSource), test: async () => [] }) as unknown as ConnectionSource,
-});
+}), scopeOf, ["takeSignIn"]);
 
 async function addConnection(userId: string, name = "Production") {
   const result = await connections.create(userId, {
@@ -106,7 +108,7 @@ describe("sign-in state", () => {
       .insert(dataConnections)
       .values({
         id: randomUUID(),
-        userId: "alice",
+        userId: "alice", orgId: await orgOf("alice"),
         name: "Linear",
         type: "mcp",
         config: {
@@ -157,8 +159,8 @@ describe("list, rename, remove", () => {
     const older = await createApp("alice", "Older");
     const newer = await createApp("alice", "Newer");
     await db.insert(dashboards).values([
-      { appId: older, userId: "alice", artifactId: "art_1", title: "One", position: 0 },
-      { appId: older, userId: "alice", artifactId: "art_2", title: "Two", position: 1 },
+      { appId: older, userId: "alice", orgId: await orgOf("alice"), artifactId: "art_1", title: "One", position: 0 },
+      { appId: older, userId: "alice", orgId: await orgOf("alice"), artifactId: "art_2", title: "Two", position: 1 },
     ]);
     await appsService.recordConnectionUse("alice", older, connectionId);
     await appsService.rename("alice", { id: older, name: "Renamed" });
@@ -176,7 +178,7 @@ describe("list, rename, remove", () => {
   it("deletes the app with its dashboards, threads and usage, but not the connection", async () => {
     const connectionId = await addConnection("alice");
     const id = await createApp("alice");
-    await db.insert(dashboards).values({ appId: id, userId: "alice", artifactId: "art_1", title: "D", position: 0 });
+    await db.insert(dashboards).values({ appId: id, userId: "alice", orgId: await orgOf("alice"), artifactId: "art_1", title: "D", position: 0 });
     await appsService.recordConnectionUse("alice", id, connectionId);
     await threads.register("alice", id, { threadId: "conv_1", title: "Chat" });
 
@@ -195,8 +197,8 @@ describe("tree", () => {
     const first = await createApp("alice", "First");
     const second = await createApp("alice", "Second");
     await db.insert(dashboards).values([
-      { appId: first, userId: "alice", artifactId: "art_b", title: "Second tab", position: 1 },
-      { appId: first, userId: "alice", artifactId: "art_a", title: "First tab", position: 0 },
+      { appId: first, userId: "alice", orgId: await orgOf("alice"), artifactId: "art_b", title: "Second tab", position: 1 },
+      { appId: first, userId: "alice", orgId: await orgOf("alice"), artifactId: "art_a", title: "First tab", position: 0 },
     ]);
 
     expect(await appsService.tree("alice")).toEqual([
@@ -325,7 +327,7 @@ describe("threads", () => {
     await addConnection("alice");
     const id = await createApp("alice");
     let tick = Date.UTC(2026, 0, 1);
-    const clocked = createThreadService({ db, now: () => new Date((tick += 1000)) });
+    const clocked = asUser(createThreadService({ db, now: () => new Date((tick += 1000)) }), scopeOf);
 
     for (let i = 0; i < 35; i++) {
       await clocked.register("alice", id, { threadId: `conv_${i}`, title: `Chat ${i}` });

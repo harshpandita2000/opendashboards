@@ -6,12 +6,14 @@ import { createDatabase } from "@/lib/db";
 import { apps, dataConnections } from "@/lib/db/schema";
 
 import { TEST_DATABASE_URL } from "./global-setup";
+import { asUser, orgsFor } from "./scoped";
 
 const { db, pool } = createDatabase(TEST_DATABASE_URL);
-const dashboards = createDashboardService({ db });
+const { orgOf, scopeOf } = orgsFor(db);
+const dashboards = asUser(createDashboardService({ db }), scopeOf);
 
 async function createApp(userId: string) {
-  const [app] = await db.insert(apps).values({ userId, name: "Test app" }).returning({ id: apps.id });
+  const [app] = await db.insert(apps).values({ userId, orgId: await orgOf(userId), name: "Test app" }).returning({ id: apps.id });
   return app.id;
 }
 

@@ -16,8 +16,10 @@ import { createKmsSecretBox } from "@/lib/secrets/kms";
 import { plaintextSecretBox } from "@/lib/secrets/plaintext";
 
 import { TEST_DATABASE_URL } from "./global-setup";
+import { asUser, orgsFor } from "./scoped";
 
 const { db, pool } = createDatabase(TEST_DATABASE_URL);
+const { orgOf, scopeOf } = orgsFor(db);
 
 const VALID = {
   type: "posthog",
@@ -65,13 +67,13 @@ function makeService(
             return result.canWrite ? ["can_write"] : [];
           },
         }) as unknown as ConnectionSource;
-  const service = createConnectionService({
+  const raw = createConnectionService({
     db,
     secrets: () => overrides.secrets ?? plaintextSecretBox,
     sources,
     demo: overrides.demo ?? { datasets: () => [DEMO], password: () => "demo-password" },
   });
-  return { service, testConnection, testPostgres };
+  return { service: asUser(raw, scopeOf, ["takeSignIn"]), raw, testConnection, testPostgres };
 }
 
 async function createOk(userId: string, input: object = VALID) {
@@ -288,7 +290,7 @@ describe("rename and remove", () => {
 
   it("refuses to delete a connection an app uses, and lists the apps", async () => {
     const id = await createOk("alice");
-    const [app] = await db.insert(apps).values({ userId: "alice", name: "Growth" }).returning();
+    const [app] = await db.insert(apps).values({ userId: "alice", orgId: await orgOf("alice"), name: "Growth" }).returning();
     await db.insert(appConnections).values({ appId: app.id, connectionId: id });
     const { service } = makeService();
 
@@ -500,7 +502,7 @@ describe("demo datasets", () => {
     if (!first.ok) return;
 
     const [row] = await db.select().from(dataConnections);
-    expect(row).toMatchObject({ userId: "alice", demoDataset: "retail", secret: null, type: "postgres" });
+    expect(row).toMatchObject({ userId: "alice", orgId: await orgOf("alice"), demoDataset: "retail", secret: null, type: "postgres" });
 
     expect(await service.open("alice", first.data.id, "postgres")).toEqual({
       id: first.data.id,
@@ -547,7 +549,7 @@ describe("demo datasets", () => {
     expect(await service.replaceCredential("alice", { id, credential: "x" })).toMatchObject({ ok: false, error: { code: "demo_dataset" } });
     expect(await service.rename("alice", { id, name: "Mine" })).toMatchObject({ ok: false });
 
-    const [app] = await db.insert(apps).values({ userId: "alice", name: "Sales" }).returning();
+    const [app] = await db.insert(apps).values({ userId: "alice", orgId: await orgOf("alice"), name: "Sales" }).returning();
     await db.insert(appConnections).values({ appId: app.id, connectionId: id });
     expect(await service.uninstallDemo("alice", { dataset: "retail" })).toMatchObject({
       ok: false,
@@ -564,7 +566,7 @@ describe("demo datasets", () => {
     await expect(
       db.insert(dataConnections).values({
         id: crypto.randomUUID(),
-        userId: "alice",
+        userId: "alice", orgId: await orgOf("alice"),
         name: "Odd",
         type: "postgres",
         config: { type: "postgres", ...DEMO.postgres },
